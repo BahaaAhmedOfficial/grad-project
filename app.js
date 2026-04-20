@@ -1,5 +1,3 @@
-const { useEffect, useMemo, useRef, useState } = React;
-
 const PLAYER_COUNT = 11;
 const TOAST_TIMEOUT_MS = 4200;
 const RECONNECT_DELAY_MS = 2500;
@@ -64,7 +62,6 @@ const ENGLISH_PLAYER_NAMES = [
   "Jacob Wells",
 ];
 
-// AI response cache by telemetry snapshot
 const aiCache = new Map();
 const aiPendingRequests = new Map();
 const AI_PROXY_URL = "";
@@ -82,6 +79,84 @@ const FORMATION_4_4_3 = [
   { top: "30%", left: "33%" },
   { top: "30%", left: "67%" },
 ];
+
+const state = {
+  profile: null,
+  players: [],
+  activeVestPlayerId: null,
+  matchState: "Idle",
+  matchStartedAt: null,
+  playerPositions: createInitialFormationPositions(),
+  route: parseHashRoute(),
+  summaryByPlayer: new Map(),
+  toasts: new Map(),
+  ws: {
+    socket: null,
+    reconnectTimer: null,
+    disposed: false,
+    connected: false,
+  },
+  movement: {
+    headingDeg: DEFAULT_HEADING_DEG,
+    lastUpdateTs: null,
+    randomVectors: new Map(),
+  },
+  exportInFlightByPlayer: new Set(),
+};
+
+const dom = {
+  root: document.getElementById("root"),
+  toastLayer: null,
+};
+
+function createElement(tagName, options = {}, children = []) {
+  const node = document.createElement(tagName);
+
+  if (options.className) {
+    node.className = options.className;
+  }
+
+  if (options.text !== undefined) {
+    node.textContent = options.text;
+  }
+
+  if (options.html !== undefined) {
+    node.innerHTML = options.html;
+  }
+
+  if (options.attrs) {
+    Object.entries(options.attrs).forEach(([key, value]) => {
+      if (value !== null && value !== undefined) {
+        node.setAttribute(key, String(value));
+      }
+    });
+  }
+
+  if (options.style) {
+    Object.entries(options.style).forEach(([key, value]) => {
+      node.style.setProperty(key, value);
+    });
+  }
+
+  if (options.on) {
+    Object.entries(options.on).forEach(([eventName, handler]) => {
+      node.addEventListener(eventName, handler);
+    });
+  }
+
+  children.forEach((child) => {
+    if (child === null || child === undefined) {
+      return;
+    }
+    if (typeof child === "string") {
+      node.appendChild(document.createTextNode(child));
+      return;
+    }
+    node.appendChild(child);
+  });
+
+  return node;
+}
 
 function toNumber(value) {
   if (value === null || value === undefined || value === "") {
@@ -199,113 +274,19 @@ function movePointByHeading(position, headingDeg, distance) {
   };
 }
 
-function useHashRoute() {
-  const parse = () => {
-    const hash = window.location.hash || "#/";
-    if (!hash.startsWith("#/player/")) {
-      return { name: "team" };
-    }
+function parseHashRoute() {
+  const hash = window.location.hash || "#/";
+  if (!hash.startsWith("#/player/")) {
+    return { name: "team" };
+  }
 
-    const idPart = hash.replace("#/player/", "");
-    const id = Number(idPart);
-    if (!Number.isInteger(id)) {
-      return { name: "team" };
-    }
+  const idPart = hash.replace("#/player/", "");
+  const id = Number(idPart);
+  if (!Number.isInteger(id)) {
+    return { name: "team" };
+  }
 
-    return { name: "player", id };
-  };
-
-  const [route, setRoute] = useState(parse);
-
-  useEffect(() => {
-    const onHashChange = () => setRoute(parse());
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
-
-  return route;
-}
-
-function useSingleVestTelemetry(activePlayerId, onMessage, onConnectionChange) {
-  const [connected, setConnected] = useState(false);
-
-  useEffect(() => {
-    if (!activePlayerId) {
-      setConnected(false);
-      onConnectionChange(false);
-      return;
-    }
-
-    let socket = null;
-    let reconnectTimer = null;
-    let disposed = false;
-
-    const connect = () => {
-      if (disposed) {
-        return;
-      }
-
-      try {
-        socket = new WebSocket(DEFAULT_WS_URL);
-      } catch (error) {
-        setConnected(false);
-        onConnectionChange(false);
-        reconnectTimer = window.setTimeout(connect, RECONNECT_DELAY_MS);
-        return;
-      }
-
-      socket.addEventListener("open", () => {
-        setConnected(true);
-        onConnectionChange(true);
-      });
-
-      socket.addEventListener("message", (event) => {
-        try {
-          const normalized = normalizeTelemetryPayload(event.data);
-          if (!normalized) {
-            return;
-          }
-
-          onMessage({
-            type: "telemetry",
-            playerId: activePlayerId,
-            payload: normalized,
-          });
-        } catch (error) {
-          // Ignore malformed packets and continue listening.
-        }
-      });
-
-      socket.addEventListener("error", () => {
-        setConnected(false);
-        onConnectionChange(false);
-      });
-
-      socket.addEventListener("close", () => {
-        setConnected(false);
-        onConnectionChange(false);
-        if (!disposed) {
-          reconnectTimer = window.setTimeout(connect, RECONNECT_DELAY_MS);
-        }
-      });
-    };
-
-    connect();
-
-    return () => {
-      disposed = true;
-      setConnected(false);
-      onConnectionChange(false);
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-      }
-      if (socket) {
-        socket.close();
-      }
-    };
-  }, [activePlayerId, onMessage, onConnectionChange]);
-
-  return connected;
+  return { name: "player", id };
 }
 
 function formatMetric(value, key) {
@@ -356,15 +337,851 @@ function getCriticalMessages(playerName, telemetry) {
 function getMetricCardStyle(metricKey) {
   const backgroundImage = METRIC_CARD_BACKGROUNDS[metricKey];
   if (!backgroundImage) {
-    return undefined;
+    return {};
   }
 
   return { "--metric-card-bg": `url("${backgroundImage}")` };
 }
 
-async function testAPIKey() {
-  console.log("Testing backend Gemini connectivity...");
+function playWhistle(src) {
+  const audio = new Audio(src);
+  audio.play().catch(() => {
+    // Ignore playback errors (for example, unsupported format on some browsers).
+  });
+}
 
+function ensureToastLayer() {
+  if (dom.toastLayer) {
+    return dom.toastLayer;
+  }
+
+  dom.toastLayer = createElement("div", {
+    className: "fixed right-4 top-4 z-50 space-y-2 w-[min(92vw,26rem)]",
+  });
+
+  document.body.appendChild(dom.toastLayer);
+  return dom.toastLayer;
+}
+
+function removeToast(id) {
+  const toast = state.toasts.get(id);
+  if (!toast) {
+    return;
+  }
+
+  if (toast.timer) {
+    clearTimeout(toast.timer);
+  }
+
+  if (toast.node && toast.node.parentNode) {
+    toast.node.parentNode.removeChild(toast.node);
+  }
+
+  state.toasts.delete(id);
+}
+
+function pushToast(message, level = "info") {
+  const layer = ensureToastLayer();
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const closeButton = createElement("button", {
+    className: "text-xs opacity-70 hover:opacity-100",
+    text: "Close",
+  });
+
+  const text = createElement("p", {
+    className: "text-sm font-semibold leading-5",
+    text: message,
+  });
+
+  const row = createElement(
+    "div",
+    { className: "flex items-start justify-between gap-4" },
+    [text, closeButton],
+  );
+
+  const card = createElement(
+    "div",
+    {
+      className: `toast-card ${level === "critical" ? "critical" : "info"}`,
+    },
+    [row],
+  );
+
+  closeButton.addEventListener("click", () => removeToast(id));
+
+  layer.appendChild(card);
+
+  const timer = setTimeout(() => {
+    removeToast(id);
+  }, TOAST_TIMEOUT_MS);
+
+  state.toasts.set(id, { node: card, timer });
+}
+
+function getSelectedPlayer() {
+  if (state.route.name !== "player") {
+    return null;
+  }
+
+  return state.players.find((p) => p.id === state.route.id) || null;
+}
+
+function getSummaryTemplate(player) {
+  return `Athlete Profile:\n- Name: ${player.name}\n- Jersey: #${player.jerseyNumber}\n- Height: ${player.heightCm || "-"} cm\n- Weight: ${player.weightKg || "-"} kg\n- Age: ${player.age || "-"}\n\nSession Duration:\n-\n\nSamples Captured:\n- ${player.samplesCaptured}\n\nTelemetry Summary:\n`;
+}
+
+function getPlayerSummary(player) {
+  const existing = state.summaryByPlayer.get(player.id);
+  if (typeof existing === "string") {
+    return existing;
+  }
+
+  const template = getSummaryTemplate(player);
+  state.summaryByPlayer.set(player.id, template);
+  return template;
+}
+
+function setPlayerSummary(playerId, summary) {
+  state.summaryByPlayer.set(playerId, summary);
+}
+
+function getSessionDurationText() {
+  if (!state.matchStartedAt) {
+    return "00:00";
+  }
+
+  const seconds = Math.max(
+    0,
+    Math.floor((Date.now() - state.matchStartedAt) / 1000),
+  );
+  const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const ss = String(seconds % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function openPlayer(id) {
+  window.location.hash = `#/player/${id}`;
+}
+
+function backToTeam() {
+  window.location.hash = "#/";
+}
+
+function handleProfileSubmit(form) {
+  const payload = {
+    name: form.name.trim(),
+    heightCm: Number(form.heightCm),
+    weightKg: Number(form.weightKg),
+    age: Number(form.age),
+    jerseyNumber: Number(form.jerseyNumber),
+  };
+
+  if (
+    !payload.name ||
+    payload.heightCm <= 0 ||
+    payload.weightKg <= 0 ||
+    payload.age <= 0
+  ) {
+    pushToast("Please enter a valid athlete profile.", "info");
+    return;
+  }
+
+  if (payload.jerseyNumber < 1 || payload.jerseyNumber > 99) {
+    pushToast("Jersey number must be between 1 and 99.", "info");
+    return;
+  }
+
+  state.profile = payload;
+  state.players = createInitialPlayers(payload);
+  state.playerPositions = createInitialFormationPositions();
+  state.summaryByPlayer.clear();
+
+  if (!window.location.hash) {
+    window.location.hash = "#/";
+  }
+
+  render();
+}
+
+function handlePlayerClick(id) {
+  if (!state.profile) {
+    pushToast("Complete athlete setup first.", "info");
+    return;
+  }
+
+  if (!state.activeVestPlayerId) {
+    state.activeVestPlayerId = id;
+    state.movement.headingDeg = DEFAULT_HEADING_DEG;
+    state.movement.lastUpdateTs = null;
+    state.matchState = "Idle";
+    state.matchStartedAt = null;
+
+    state.players = state.players.map((player) => {
+      if (player.id !== id) {
+        return { ...player, online: false };
+      }
+
+      return {
+        ...player,
+        name: state.profile.name,
+        jerseyNumber: state.profile.jerseyNumber,
+        heightCm: state.profile.heightCm,
+        weightKg: state.profile.weightKg,
+        age: state.profile.age,
+        online: false,
+      };
+    });
+
+    pushToast(
+      `Vest assigned to ${state.profile.name}. Waiting for actual vest connection...`,
+      "info",
+    );
+
+    connectVestSocket();
+    openPlayer(id);
+    return;
+  }
+
+  if (state.activeVestPlayerId !== id) {
+    pushToast(
+      "Only one vest is active. Open the selected vest player to view live telemetry.",
+      "info",
+    );
+    return;
+  }
+
+  openPlayer(id);
+}
+
+function updateActivePlayerOnline(isConnected) {
+  if (!state.activeVestPlayerId) {
+    return;
+  }
+
+  state.players = state.players.map((player) => {
+    if (player.id !== state.activeVestPlayerId) {
+      return player;
+    }
+    return { ...player, online: isConnected };
+  });
+}
+
+function disconnectVestSocket() {
+  state.ws.disposed = true;
+
+  if (state.ws.reconnectTimer) {
+    clearTimeout(state.ws.reconnectTimer);
+    state.ws.reconnectTimer = null;
+  }
+
+  if (state.ws.socket) {
+    state.ws.socket.close();
+    state.ws.socket = null;
+  }
+
+  state.ws.connected = false;
+  updateActivePlayerOnline(false);
+}
+
+function connectVestSocket() {
+  disconnectVestSocket();
+
+  if (!state.activeVestPlayerId) {
+    render();
+    return;
+  }
+
+  state.ws.disposed = false;
+
+  const connect = () => {
+    if (state.ws.disposed) {
+      return;
+    }
+
+    let socket;
+    try {
+      socket = new WebSocket(DEFAULT_WS_URL);
+    } catch (error) {
+      state.ws.connected = false;
+      updateActivePlayerOnline(false);
+      state.ws.reconnectTimer = window.setTimeout(connect, RECONNECT_DELAY_MS);
+      render();
+      return;
+    }
+
+    state.ws.socket = socket;
+
+    socket.addEventListener("open", () => {
+      state.ws.connected = true;
+      updateActivePlayerOnline(true);
+      render();
+    });
+
+    socket.addEventListener("message", (event) => {
+      try {
+        const normalized = normalizeTelemetryPayload(event.data);
+        if (!normalized) {
+          return;
+        }
+
+        handleTelemetryPacket(state.activeVestPlayerId, normalized);
+      } catch (error) {
+        // Ignore malformed packets and continue listening.
+      }
+    });
+
+    socket.addEventListener("error", () => {
+      state.ws.connected = false;
+      updateActivePlayerOnline(false);
+      render();
+    });
+
+    socket.addEventListener("close", () => {
+      state.ws.connected = false;
+      updateActivePlayerOnline(false);
+      render();
+
+      if (!state.ws.disposed) {
+        state.ws.reconnectTimer = window.setTimeout(
+          connect,
+          RECONNECT_DELAY_MS,
+        );
+      }
+    });
+  };
+
+  connect();
+}
+
+function handleTelemetryPacket(playerId, payload) {
+  const now = Date.now();
+  const movementState = state.movement;
+
+  if (playerId === state.activeVestPlayerId) {
+    const dtSeconds = movementState.lastUpdateTs
+      ? Math.max(0.04, Math.min(1.2, (now - movementState.lastUpdateTs) / 1000))
+      : 0.2;
+
+    movementState.lastUpdateTs = now;
+
+    const gyroZ = toNumber(payload.gyroZ) ?? 0;
+    const speedFromPayload = toNumber(payload.speed);
+    const acceleration =
+      toNumber(payload.acceleration) !== null
+        ? Math.abs(toNumber(payload.acceleration))
+        : null;
+    const fallbackSpeed = acceleration !== null ? acceleration * 0.18 : 0;
+    const speed = Math.max(0, speedFromPayload ?? fallbackSpeed);
+
+    movementState.headingDeg += gyroZ * dtSeconds;
+
+    const distance = speed * MOVEMENT_SPEED_TO_PERCENT_PER_SEC * dtSeconds;
+
+    if (distance > 0) {
+      state.playerPositions = state.playerPositions.map((entry) => {
+        if (entry.id !== state.activeVestPlayerId) {
+          return entry;
+        }
+
+        const moved = movePointByHeading(
+          entry,
+          movementState.headingDeg,
+          distance,
+        );
+        return { ...entry, ...moved };
+      });
+    }
+  }
+
+  state.players = state.players.map((player) => {
+    if (player.id !== playerId) {
+      return player;
+    }
+
+    const updated = {
+      ...player,
+      online: true,
+      lastSeen: now,
+      telemetry: { ...player.telemetry, ...payload },
+      samplesCaptured: player.samplesCaptured + 1,
+    };
+
+    const criticalMessages = getCriticalMessages(
+      updated.name,
+      updated.telemetry,
+    );
+    criticalMessages.forEach((message) => pushToast(message, "critical"));
+
+    return updated;
+  });
+
+  render();
+}
+
+function startRandomDrift() {
+  setInterval(() => {
+    if (!state.players.length) {
+      return;
+    }
+
+    const movementState = state.movement;
+
+    state.playerPositions = state.playerPositions.map((entry) => {
+      if (entry.id === state.activeVestPlayerId) {
+        return entry;
+      }
+
+      let vector = movementState.randomVectors.get(entry.id);
+      if (!vector || vector.stepsLeft <= 0) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 0.25 + Math.random() * 0.75;
+        vector = {
+          dx: Math.cos(angle) * speed,
+          dy: Math.sin(angle) * speed,
+          stepsLeft: 2 + Math.floor(Math.random() * 6),
+        };
+      }
+
+      let nextX = entry.x + vector.dx;
+      let nextY = entry.y + vector.dy;
+
+      if (nextX < FIELD_X_MIN || nextX > FIELD_X_MAX) {
+        vector.dx *= -1;
+        nextX = clamp(entry.x + vector.dx, FIELD_X_MIN, FIELD_X_MAX);
+      }
+
+      if (nextY < FIELD_Y_MIN || nextY > FIELD_Y_MAX) {
+        vector.dy *= -1;
+        nextY = clamp(entry.y + vector.dy, FIELD_Y_MIN, FIELD_Y_MAX);
+      }
+
+      vector.stepsLeft -= 1;
+      movementState.randomVectors.set(entry.id, vector);
+
+      return {
+        ...entry,
+        x: nextX,
+        y: nextY,
+      };
+    });
+
+    if (state.route.name === "team") {
+      render();
+    }
+  }, RANDOM_DRIFT_INTERVAL_MS);
+}
+
+function startMatch() {
+  if (state.matchState === "Active") {
+    return;
+  }
+
+  state.matchState = "Active";
+  state.matchStartedAt = Date.now();
+  playWhistle(START_MATCH_WHISTLE_SRC);
+
+  const player = getSelectedPlayer();
+  if (player) {
+    const prev = getPlayerSummary(player);
+    setPlayerSummary(
+      player.id,
+      `${prev}\nSession started at ${new Date().toLocaleTimeString()}.\n`,
+    );
+  }
+
+  render();
+}
+
+function endMatch() {
+  if (state.matchState !== "Active") {
+    return;
+  }
+
+  state.matchState = "Idle";
+  playWhistle(END_MATCH_WHISTLE_SRC);
+
+  const player = getSelectedPlayer();
+  if (player) {
+    const prev = getPlayerSummary(player);
+    setPlayerSummary(
+      player.id,
+      `${prev}\nSession ended at ${new Date().toLocaleTimeString()}.\n`,
+    );
+  }
+
+  render();
+}
+
+function appendLabeledValue(parent, label, value) {
+  const wrapper = createElement("div");
+  wrapper.appendChild(createElement("span", { text: label }));
+  wrapper.appendChild(createElement("strong", { text: value }));
+  parent.appendChild(wrapper);
+}
+
+function renderAthleteSetupModal() {
+  const overlay = createElement("div", {
+    className: "setup-overlay fixed inset-0 z-[80] grid place-items-center p-4",
+  });
+
+  const form = createElement("form", {
+    className: "setup-card w-full max-w-lg rounded-2xl p-5 sm:p-6",
+  });
+
+  form.appendChild(
+    createElement("h2", {
+      className: "text-2xl font-bold text-white",
+      text: "Athlete Setup",
+    }),
+  );
+  form.appendChild(
+    createElement("p", {
+      className: "mt-1 text-sm text-white/80",
+      text: "Enter your athlete profile first. The vest will be assigned to the first player you click on the field.",
+    }),
+  );
+
+  const grid = createElement("div", {
+    className: "mt-5 grid gap-3 sm:grid-cols-2",
+  });
+
+  const fields = [
+    {
+      key: "name",
+      label: "Name",
+      attrs: { required: "", placeholder: "Athlete name" },
+      span2: true,
+    },
+    {
+      key: "heightCm",
+      label: "Height (cm)",
+      attrs: {
+        required: "",
+        type: "number",
+        min: "50",
+        max: "260",
+        step: "0.1",
+      },
+    },
+    {
+      key: "weightKg",
+      label: "Weight (kg)",
+      attrs: {
+        required: "",
+        type: "number",
+        min: "20",
+        max: "250",
+        step: "0.1",
+      },
+    },
+    {
+      key: "age",
+      label: "Age",
+      attrs: { required: "", type: "number", min: "10", max: "60", step: "1" },
+    },
+    {
+      key: "jerseyNumber",
+      label: "Jersey Number",
+      attrs: { required: "", type: "number", min: "1", max: "99", step: "1" },
+    },
+  ];
+
+  const values = {
+    name: "",
+    heightCm: "",
+    weightKg: "",
+    age: "",
+    jerseyNumber: "",
+  };
+
+  fields.forEach((field) => {
+    const label = createElement("label", {
+      className: `setup-label ${field.span2 ? "sm:col-span-2" : ""}`.trim(),
+      text: field.label,
+    });
+
+    const input = createElement("input", {
+      className: "setup-input",
+      attrs: field.attrs,
+      on: {
+        input: (event) => {
+          values[field.key] = event.target.value;
+        },
+      },
+    });
+
+    label.appendChild(input);
+    grid.appendChild(label);
+  });
+
+  form.appendChild(grid);
+
+  const submitButton = createElement("button", {
+    className:
+      "mt-5 w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400",
+    attrs: { type: "submit" },
+    text: "Continue",
+  });
+
+  form.appendChild(submitButton);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleProfileSubmit(values);
+  });
+
+  overlay.appendChild(form);
+  return overlay;
+}
+
+function renderTeamOverview() {
+  const section = createElement("section", { className: "space-y-4" });
+
+  const topRow = createElement("div", {
+    className: "flex flex-wrap items-end justify-between gap-2",
+  });
+
+  const titleBlock = createElement("div");
+  titleBlock.appendChild(
+    createElement("h1", {
+      className: "text-3xl font-bold tracking-tight text-white",
+      text: "Athlete Telemetry System",
+    }),
+  );
+  titleBlock.appendChild(
+    createElement("p", {
+      className: "mt-1 text-sm text-white/80",
+      text: "Dashboard 0: 4-4-3 formation and live injury alerts",
+    }),
+  );
+
+  const modePill = createElement("p", {
+    className:
+      "rounded-full border border-white/30 bg-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-widest text-white/85",
+    text: "Single Active Vest Mode",
+  });
+
+  topRow.appendChild(titleBlock);
+  topRow.appendChild(modePill);
+  section.appendChild(topRow);
+
+  const board = createElement("div", { className: "field-board" });
+
+  state.players.forEach((player, index) => {
+    const pos =
+      state.playerPositions.find((entry) => entry.id === player.id) ||
+      createInitialFormationPositions()[index];
+    const isActive = player.id === state.activeVestPlayerId;
+
+    const button = createElement("button", {
+      className: `formation-player ${player.online ? "online" : "offline"} ${isActive ? "is-vest" : ""}`,
+      style: {
+        top: `${pos.y}%`,
+        left: `${pos.x}%`,
+      },
+      attrs: {
+        title: isActive ? "Active vest player" : "Click to select player",
+      },
+      on: {
+        click: () => handlePlayerClick(player.id),
+      },
+    });
+
+    button.appendChild(
+      createElement("span", {
+        className: "formation-player-jersey",
+        text: `#${player.jerseyNumber}`,
+      }),
+    );
+
+    button.appendChild(
+      createElement("span", {
+        className: "formation-player-name",
+        text: player.name,
+      }),
+    );
+
+    button.appendChild(
+      createElement("span", {
+        className: `status-pill ${player.online ? "on" : "off"}`,
+        text: player.online ? "Online" : "Offline",
+      }),
+    );
+
+    board.appendChild(button);
+  });
+
+  section.appendChild(board);
+  return section;
+}
+
+function renderDashboardHeader(player) {
+  const header = createElement("header", {
+    className: "mb-5 flex flex-wrap items-start justify-between gap-4",
+  });
+
+  const left = createElement("div");
+  left.appendChild(
+    createElement("button", {
+      className:
+        "mb-2 rounded-full border border-white/35 bg-white/10 px-3 py-1 text-xs font-semibold tracking-wide text-white hover:bg-white/20",
+      text: "Back to Team Dashboard",
+      on: {
+        click: backToTeam,
+      },
+    }),
+  );
+
+  left.appendChild(
+    createElement("h1", {
+      className: "text-3xl font-bold tracking-tight text-white",
+      text: "Athlete Telemetry System",
+    }),
+  );
+
+  left.appendChild(
+    createElement("p", {
+      className: "mt-1 text-sm text-white/80",
+      text: `Dashboard 1: ${player.name} (Jersey #${player.jerseyNumber})`,
+    }),
+  );
+
+  const connected = state.ws.connected && player.online;
+
+  const pill = createElement("div", {
+    className: `connection-pill ${connected ? "connected" : "disconnected"}`,
+  });
+  pill.appendChild(createElement("span", { className: "status-dot" }));
+  pill.appendChild(
+    createElement("span", {
+      text: connected ? "Connected" : "Disconnected",
+    }),
+  );
+
+  header.appendChild(left);
+  header.appendChild(pill);
+  return header;
+}
+
+function renderMatchControls() {
+  const section = createElement("section", {
+    className:
+      "glass-panel mb-5 flex flex-wrap items-center justify-between gap-3 px-4 py-3",
+  });
+
+  const left = createElement("div", { className: "flex items-center gap-2" });
+  left.appendChild(
+    createElement("p", {
+      className:
+        "text-sm font-semibold uppercase tracking-widest text-slate-600",
+      text: "Match State",
+    }),
+  );
+
+  left.appendChild(
+    createElement("span", {
+      className: `rounded-full px-3 py-1 text-sm font-bold ${
+        state.matchState === "Active"
+          ? "bg-emerald-100 text-emerald-700"
+          : "bg-slate-200 text-slate-700"
+      }`,
+      text: state.matchState,
+    }),
+  );
+
+  const actions = createElement("div", { className: "flex gap-2" });
+
+  const startBtn = createElement("button", {
+    className:
+      "rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50",
+    text: "Start Match",
+    attrs: { disabled: state.matchState === "Active" ? "" : null },
+    on: { click: startMatch },
+  });
+
+  const endBtn = createElement("button", {
+    className:
+      "rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50",
+    text: "End Match",
+    attrs: { disabled: state.matchState !== "Active" ? "" : null },
+    on: { click: endMatch },
+  });
+
+  actions.appendChild(startBtn);
+  actions.appendChild(endBtn);
+
+  section.appendChild(left);
+  section.appendChild(actions);
+  return section;
+}
+
+function renderTelemetryGrid(player) {
+  const section = createElement("section", {
+    className: "grid gap-4 md:grid-cols-2 xl:grid-cols-3",
+  });
+
+  const criticalFlags = getCriticalFlags(player.telemetry);
+
+  METRIC_CONFIG.forEach((metric) => {
+    const style = getMetricCardStyle(metric.key);
+
+    const card = createElement("article", {
+      className: `metric-card p-5 ${criticalFlags[metric.key] ? "critical" : ""}`,
+      style,
+    });
+
+    card.appendChild(
+      createElement("p", {
+        className: "metric-label text-xs font-bold uppercase tracking-[0.16em]",
+        text: metric.label,
+      }),
+    );
+
+    const valueRow = createElement("p", {
+      className: "metric-value mt-4 text-4xl font-bold tracking-tight",
+      text: formatMetric(player.telemetry[metric.key], metric.key),
+    });
+
+    valueRow.appendChild(
+      createElement("span", {
+        className: "metric-unit ml-2 text-base font-semibold",
+        text: metric.unit,
+      }),
+    );
+
+    card.appendChild(valueRow);
+    section.appendChild(card);
+  });
+
+  return section;
+}
+
+function escapeHtml(text) {
+  if (text === null || text === undefined) {
+    return "";
+  }
+
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function markdownToHtml(markdown) {
+  if (window.marked && typeof window.marked.parse === "function") {
+    return window.marked.parse(markdown || "", {
+      gfm: true,
+      breaks: true,
+    });
+  }
+
+  return `<pre>${escapeHtml(markdown || "")}</pre>`;
+}
+
+async function testAPIKey() {
   try {
     const response = await fetch(`${AI_PROXY_URL}/api/health`);
     const data = await response.json();
@@ -388,13 +1205,11 @@ async function testAPIKey() {
 }
 
 async function generateAISuggestions(player, summary) {
-  // Cache responses for unchanged telemetry to avoid repeated AI calls.
   const cacheKey = JSON.stringify({ telemetry: player.telemetry, summary });
   if (aiCache.has(cacheKey)) {
     return aiCache.get(cacheKey);
   }
 
-  // Hard dedupe: if an identical request is already in flight, reuse it.
   if (aiPendingRequests.has(cacheKey)) {
     return aiPendingRequests.get(cacheKey);
   }
@@ -468,30 +1283,6 @@ async function generateAISuggestions(player, summary) {
   } finally {
     aiPendingRequests.delete(cacheKey);
   }
-}
-
-function escapeHtml(text) {
-  if (text === null || text === undefined) {
-    return "";
-  }
-
-  return String(text)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function markdownToHtml(markdown) {
-  if (window.marked && typeof window.marked.parse === "function") {
-    return window.marked.parse(markdown || "", {
-      gfm: true,
-      breaks: true,
-    });
-  }
-
-  return `<pre>${escapeHtml(markdown || "")}</pre>`;
 }
 
 function createPdfExportTemplate(player, summary, suggestions) {
@@ -642,790 +1433,210 @@ async function exportMatchPdf(player, summary) {
   }
 }
 
-function playWhistle(src) {
-  const audio = new Audio(src);
-  audio.play().catch(() => {
-    // Ignore playback errors (for example, unsupported format on some browsers).
-  });
-}
-
-function ToastLayer({ toasts, dismiss }) {
-  return (
-    <div className="fixed right-4 top-4 z-50 space-y-2 w-[min(92vw,26rem)]">
-      {toasts.map((toast) => (
-        <div
-          key={toast.id}
-          className={`toast-card ${toast.level === "critical" ? "critical" : "info"}`}
-        >
-          <div className="flex items-start justify-between gap-4">
-            <p className="text-sm font-semibold leading-5">{toast.message}</p>
-            <button
-              className="text-xs opacity-70 hover:opacity-100"
-              onClick={() => dismiss(toast.id)}
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AthleteSetupModal({ onSubmit }) {
-  const [form, setForm] = useState({
-    name: "",
-    heightCm: "",
-    weightKg: "",
-    age: "",
-    jerseyNumber: "",
+function renderMatchReport(player) {
+  const panel = createElement("section", {
+    className: "glass-panel mt-5 space-y-3 p-4",
   });
 
-  const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  const top = createElement("div", {
+    className: "flex flex-wrap items-center justify-between gap-2",
+  });
 
-  const submit = (e) => {
-    e.preventDefault();
-
-    const payload = {
-      name: form.name.trim(),
-      heightCm: Number(form.heightCm),
-      weightKg: Number(form.weightKg),
-      age: Number(form.age),
-      jerseyNumber: Number(form.jerseyNumber),
-    };
-
-    if (
-      !payload.name ||
-      payload.heightCm <= 0 ||
-      payload.weightKg <= 0 ||
-      payload.age <= 0
-    ) {
-      return;
-    }
-
-    if (payload.jerseyNumber < 1 || payload.jerseyNumber > 99) {
-      return;
-    }
-
-    onSubmit(payload);
-  };
-
-  return (
-    <div className="setup-overlay fixed inset-0 z-[80] grid place-items-center p-4">
-      <form
-        onSubmit={submit}
-        className="setup-card w-full max-w-lg rounded-2xl p-5 sm:p-6"
-      >
-        <h2 className="text-2xl font-bold text-white">Athlete Setup</h2>
-        <p className="mt-1 text-sm text-white/80">
-          Enter your athlete profile first. The vest will be assigned to the
-          first player you click on the field.
-        </p>
-
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <label className="setup-label sm:col-span-2">
-            Name
-            <input
-              required
-              value={form.name}
-              onChange={(e) => update("name", e.target.value)}
-              className="setup-input"
-              placeholder="Athlete name"
-            />
-          </label>
-
-          <label className="setup-label">
-            Height (cm)
-            <input
-              required
-              type="number"
-              min="50"
-              max="260"
-              step="0.1"
-              value={form.heightCm}
-              onChange={(e) => update("heightCm", e.target.value)}
-              className="setup-input"
-            />
-          </label>
-
-          <label className="setup-label">
-            Weight (kg)
-            <input
-              required
-              type="number"
-              min="20"
-              max="250"
-              step="0.1"
-              value={form.weightKg}
-              onChange={(e) => update("weightKg", e.target.value)}
-              className="setup-input"
-            />
-          </label>
-
-          <label className="setup-label">
-            Age
-            <input
-              required
-              type="number"
-              min="10"
-              max="60"
-              step="1"
-              value={form.age}
-              onChange={(e) => update("age", e.target.value)}
-              className="setup-input"
-            />
-          </label>
-
-          <label className="setup-label">
-            Jersey Number
-            <input
-              required
-              type="number"
-              min="1"
-              max="99"
-              step="1"
-              value={form.jerseyNumber}
-              onChange={(e) => update("jerseyNumber", e.target.value)}
-              className="setup-input"
-            />
-          </label>
-        </div>
-
-        <button
-          type="submit"
-          className="mt-5 w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
-        >
-          Continue
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function TeamOverview({
-  players,
-  activeVestPlayerId,
-  playerPositions,
-  onPlayerClick,
-}) {
-  return (
-    <section className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-2">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-white">
-            Athlete Telemetry System
-          </h1>
-          <p className="mt-1 text-sm text-white/80">
-            Dashboard 0: 4-4-3 formation and live injury alerts
-          </p>
-        </div>
-        <p className="rounded-full border border-white/30 bg-white/10 px-4 py-2 text-xs font-semibold uppercase tracking-widest text-white/85">
-          Single Active Vest Mode
-        </p>
-      </div>
-
-      <div className="field-board">
-        {players.map((player, index) => {
-          const pos =
-            playerPositions.get(player.id) ||
-            createInitialFormationPositions()[index];
-          const isActive = player.id === activeVestPlayerId;
-
-          return (
-            <button
-              key={player.id}
-              onClick={() => onPlayerClick(player.id)}
-              className={`formation-player ${player.online ? "online" : "offline"} ${isActive ? "is-vest" : ""}`}
-              style={{ top: `${pos.y}%`, left: `${pos.x}%` }}
-              title={isActive ? "Active vest player" : "Click to select player"}
-            >
-              <span className="formation-player-jersey">
-                #{player.jerseyNumber}
-              </span>
-              <span className="formation-player-name">{player.name}</span>
-              <span className={`status-pill ${player.online ? "on" : "off"}`}>
-                {player.online ? "Online" : "Offline"}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function DashboardHeader({ player, connected, onBack }) {
-  return (
-    <header className="mb-5 flex flex-wrap items-start justify-between gap-4">
-      <div>
-        <button
-          onClick={onBack}
-          className="mb-2 rounded-full border border-white/35 bg-white/10 px-3 py-1 text-xs font-semibold tracking-wide text-white hover:bg-white/20"
-        >
-          Back to Team Dashboard
-        </button>
-        <h1 className="text-3xl font-bold tracking-tight text-white">
-          Athlete Telemetry System
-        </h1>
-        <p className="mt-1 text-sm text-white/80">
-          Dashboard 1: {player.name} (Jersey #{player.jerseyNumber})
-        </p>
-      </div>
-
-      <div
-        className={`connection-pill ${connected ? "connected" : "disconnected"}`}
-      >
-        <span className="status-dot" />
-        <span>{connected ? "Connected" : "Disconnected"}</span>
-      </div>
-    </header>
-  );
-}
-
-function MatchControls({ matchState, onStart, onEnd }) {
-  return (
-    <section className="glass-panel mb-5 flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-      <div className="flex items-center gap-2">
-        <p className="text-sm font-semibold uppercase tracking-widest text-slate-600">
-          Match State
-        </p>
-        <span
-          className={`rounded-full px-3 py-1 text-sm font-bold ${matchState === "Active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-700"}`}
-        >
-          {matchState}
-        </span>
-      </div>
-
-      <div className="flex gap-2">
-        <button
-          onClick={onStart}
-          disabled={matchState === "Active"}
-          className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Start Match
-        </button>
-        <button
-          onClick={onEnd}
-          disabled={matchState !== "Active"}
-          className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          End Match
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function TelemetryGrid({ telemetry }) {
-  const criticalFlags = getCriticalFlags(telemetry);
-
-  return (
-    <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-      {METRIC_CONFIG.map((metric) => (
-        <article
-          key={metric.key}
-          className={`metric-card p-5 ${criticalFlags[metric.key] ? "critical" : ""}`}
-          style={getMetricCardStyle(metric.key)}
-        >
-          <p className="metric-label text-xs font-bold uppercase tracking-[0.16em]">
-            {metric.label}
-          </p>
-          <p className="metric-value mt-4 text-4xl font-bold tracking-tight">
-            {formatMetric(telemetry[metric.key], metric.key)}
-            <span className="metric-unit ml-2 text-base font-semibold">
-              {metric.unit}
-            </span>
-          </p>
-        </article>
-      ))}
-    </section>
-  );
-}
-
-function MatchReport({ player, matchState, summary, setSummary, onExport }) {
-  const [isExporting, setIsExporting] = useState(false);
-  const exportClickLockRef = useRef(false);
-
-  const handleExport = async (event) => {
-    if (exportClickLockRef.current || isExporting) {
-      return;
-    }
-
-    exportClickLockRef.current = true;
-
-    // Disable immediately at click time to prevent rapid double submissions.
-    const clickedButton = event?.currentTarget;
-    if (event?.currentTarget) {
-      event.currentTarget.disabled = true;
-      event.currentTarget.textContent = "Generating AI Report...";
-    }
-
-    setIsExporting(true);
-    try {
-      await onExport();
-    } finally {
-      exportClickLockRef.current = false;
-      setIsExporting(false);
-      if (clickedButton) {
-        clickedButton.disabled = false;
-      }
-    }
-  };
-
-  return (
-    <section className="glass-panel mt-5 space-y-3 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-lg font-bold text-slate-900">Match Report</h2>
-        <button
-          onClick={handleExport}
-          disabled={!summary.trim() || isExporting}
-          className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-45"
-        >
-          {isExporting ? "Generating AI Report..." : "Export to PDF"}
-        </button>
-      </div>
-
-      <p className="text-sm text-slate-600">
-        Athlete Profile: {player.name} | Jersey: #{player.jerseyNumber} |
-        Height: {player.heightCm || "-"} cm | Weight: {player.weightKg || "-"}{" "}
-        kg | Age: {player.age || "-"} | Session Duration:{" "}
-        {player.sessionDurationText || "00:00"} | Samples Captured:{" "}
-        {player.samplesCaptured} | Match State: {matchState}
-      </p>
-
-      <textarea
-        value={summary}
-        onChange={(e) => setSummary(e.target.value)}
-        rows={8}
-        className="w-full rounded-xl border border-slate-300 bg-white/95 p-3 text-sm leading-6 text-slate-800 outline-none ring-0 focus:border-sky-500"
-        placeholder="Telemetry Summary..."
-      />
-    </section>
-  );
-}
-
-function PlayerDetail({
-  player,
-  connected,
-  onBack,
-  matchState,
-  matchStartedAt,
-  onStartMatch,
-  onEndMatch,
-}) {
-  const summaryTemplate = useMemo(
-    () =>
-      `Athlete Profile:\n- Name: ${player.name}\n- Jersey: #${player.jerseyNumber}\n- Height: ${player.heightCm || "-"} cm\n- Weight: ${player.weightKg || "-"} kg\n- Age: ${player.age || "-"}\n\nSession Duration:\n-\n\nSamples Captured:\n- ${player.samplesCaptured}\n\nTelemetry Summary:\n`,
-    [player],
+  top.appendChild(
+    createElement("h2", {
+      className: "text-lg font-bold text-slate-900",
+      text: "Match Report",
+    }),
   );
 
-  const [summary, setSummary] = useState(summaryTemplate);
-
-  useEffect(() => {
-    setSummary(summaryTemplate);
-  }, [summaryTemplate]);
-
-  const sessionDurationText = useMemo(() => {
-    if (!matchStartedAt) {
-      return "00:00";
-    }
-
-    const seconds = Math.max(
-      0,
-      Math.floor((Date.now() - matchStartedAt) / 1000),
-    );
-    const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
-    const ss = String(seconds % 60).padStart(2, "0");
-    return `${mm}:${ss}`;
-  }, [matchStartedAt, player.samplesCaptured]);
-
+  const summaryText = getPlayerSummary(player);
+  const sessionDurationText = getSessionDurationText();
   const playerWithDuration = { ...player, sessionDurationText };
 
-  const startMatch = () => {
-    onStartMatch();
-    setSummary(
-      (prev) =>
-        `${prev}\nSession started at ${new Date().toLocaleTimeString()}.\n`,
-    );
-  };
+  const isExporting = state.exportInFlightByPlayer.has(player.id);
 
-  const endMatch = () => {
-    onEndMatch();
-    setSummary(
-      (prev) =>
-        `${prev}\nSession ended at ${new Date().toLocaleTimeString()}.\n`,
-    );
-  };
-
-  const exportPdf = async () =>
-    await exportMatchPdf(playerWithDuration, summary);
-
-  return (
-    <section>
-      <DashboardHeader
-        player={player}
-        connected={connected && player.online}
-        onBack={onBack}
-      />
-      <MatchControls
-        matchState={matchState}
-        onStart={startMatch}
-        onEnd={endMatch}
-      />
-      <TelemetryGrid telemetry={player.telemetry} />
-      <MatchReport
-        player={playerWithDuration}
-        matchState={matchState}
-        summary={summary}
-        setSummary={setSummary}
-        onExport={exportPdf}
-      />
-    </section>
-  );
-}
-
-function App() {
-  const [profile, setProfile] = useState(null);
-  const [players, setPlayers] = useState([]);
-  const [activeVestPlayerId, setActiveVestPlayerId] = useState(null);
-  const [matchState, setMatchState] = useState("Idle");
-  const [matchStartedAt, setMatchStartedAt] = useState(null);
-  const [toasts, setToasts] = useState([]);
-  const [playerPositions, setPlayerPositions] = useState(() =>
-    createInitialFormationPositions(),
-  );
-  const route = useHashRoute();
-  const toastTimers = useRef(new Map());
-  const movementStateRef = useRef({
-    headingDeg: DEFAULT_HEADING_DEG,
-    lastUpdateTs: null,
-    randomVectors: new Map(),
+  const exportButton = createElement("button", {
+    className:
+      "rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-45",
+    text: isExporting ? "Generating AI Report..." : "Export to PDF",
+    attrs: {
+      disabled: !summaryText.trim() || isExporting ? "" : null,
+    },
   });
 
-  const playerPositionsMap = useMemo(
-    () => new Map(playerPositions.map((entry) => [entry.id, entry])),
-    [playerPositions],
+  exportButton.addEventListener("click", async (event) => {
+    if (state.exportInFlightByPlayer.has(player.id)) {
+      return;
+    }
+
+    state.exportInFlightByPlayer.add(player.id);
+
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "Generating AI Report...";
+
+    try {
+      await exportMatchPdf(playerWithDuration, summaryText);
+    } finally {
+      state.exportInFlightByPlayer.delete(player.id);
+      render();
+    }
+  });
+
+  top.appendChild(exportButton);
+
+  panel.appendChild(top);
+
+  panel.appendChild(
+    createElement("p", {
+      className: "text-sm text-slate-600",
+      text:
+        `Athlete Profile: ${player.name} | Jersey: #${player.jerseyNumber} | ` +
+        `Height: ${player.heightCm || "-"} cm | Weight: ${player.weightKg || "-"} kg | ` +
+        `Age: ${player.age || "-"} | Session Duration: ${sessionDurationText} | ` +
+        `Samples Captured: ${player.samplesCaptured} | Match State: ${state.matchState}`,
+    }),
   );
 
-  const pushToast = React.useCallback((message, level = "info") => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    setToasts((prev) => [...prev, { id, message, level }]);
+  const textarea = createElement("textarea", {
+    className:
+      "w-full rounded-xl border border-slate-300 bg-white/95 p-3 text-sm leading-6 text-slate-800 outline-none ring-0 focus:border-sky-500",
+    attrs: { rows: "8", placeholder: "Telemetry Summary..." },
+  });
 
-    const timer = setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-      toastTimers.current.delete(id);
-    }, TOAST_TIMEOUT_MS);
+  textarea.value = summaryText;
+  textarea.addEventListener("input", (event) => {
+    setPlayerSummary(player.id, event.target.value);
+  });
 
-    toastTimers.current.set(id, timer);
-  }, []);
-
-  const dismissToast = (id) => {
-    const timer = toastTimers.current.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      toastTimers.current.delete(id);
-    }
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  useEffect(() => {
-    return () => {
-      toastTimers.current.forEach((timer) => clearTimeout(timer));
-      toastTimers.current.clear();
-    };
-  }, []);
-
-  const handleProfileSubmit = (payload) => {
-    setProfile(payload);
-    setPlayers(createInitialPlayers(payload));
-    setPlayerPositions(createInitialFormationPositions());
-    if (!window.location.hash) {
-      window.location.hash = "#/";
-    }
-  };
-
-  const handleMockSocketMessage = React.useCallback(
-    (event) => {
-      const now = Date.now();
-      const movementState = movementStateRef.current;
-
-      if (event.playerId === activeVestPlayerId) {
-        const dtSeconds = movementState.lastUpdateTs
-          ? Math.max(
-              0.04,
-              Math.min(1.2, (now - movementState.lastUpdateTs) / 1000),
-            )
-          : 0.2;
-
-        movementState.lastUpdateTs = now;
-
-        const gyroZ = toNumber(event.payload.gyroZ) ?? 0;
-        const speedFromPayload = toNumber(event.payload.speed);
-        const acceleration =
-          toNumber(event.payload.acceleration) !== null
-            ? Math.abs(toNumber(event.payload.acceleration))
-            : null;
-        const fallbackSpeed = acceleration !== null ? acceleration * 0.18 : 0;
-        const speed = Math.max(0, speedFromPayload ?? fallbackSpeed);
-
-        movementState.headingDeg += gyroZ * dtSeconds;
-
-        const distance = speed * MOVEMENT_SPEED_TO_PERCENT_PER_SEC * dtSeconds;
-
-        if (distance > 0) {
-          setPlayerPositions((prevPositions) =>
-            prevPositions.map((entry) => {
-              if (entry.id !== activeVestPlayerId) {
-                return entry;
-              }
-
-              const moved = movePointByHeading(
-                entry,
-                movementState.headingDeg,
-                distance,
-              );
-
-              return { ...entry, ...moved };
-            }),
-          );
-        }
-      }
-
-      setPlayers((prev) => {
-        const next = prev.map((p) => ({ ...p }));
-        const idx = next.findIndex((p) => p.id === event.playerId);
-        if (idx === -1) {
-          return prev;
-        }
-
-        const player = next[idx];
-        if (player.id !== activeVestPlayerId) {
-          return prev;
-        }
-
-        player.online = true;
-        player.lastSeen = Date.now();
-        player.telemetry = { ...player.telemetry, ...event.payload };
-        player.samplesCaptured += 1;
-
-        const criticalMessages = getCriticalMessages(
-          player.name,
-          player.telemetry,
-        );
-        criticalMessages.forEach((message) => pushToast(message, "critical"));
-
-        return next;
-      });
-    },
-    [activeVestPlayerId, pushToast],
-  );
-
-  useEffect(() => {
-    if (!players.length) {
-      return undefined;
-    }
-
-    const timer = setInterval(() => {
-      setPlayerPositions((prevPositions) => {
-        const movementState = movementStateRef.current;
-        const nextPositions = prevPositions.map((entry) => {
-          if (entry.id === activeVestPlayerId) {
-            return entry;
-          }
-
-          let vector = movementState.randomVectors.get(entry.id);
-          if (!vector || vector.stepsLeft <= 0) {
-            const angle = Math.random() * Math.PI * 2;
-            const speed = 0.25 + Math.random() * 0.75;
-            vector = {
-              dx: Math.cos(angle) * speed,
-              dy: Math.sin(angle) * speed,
-              stepsLeft: 2 + Math.floor(Math.random() * 6),
-            };
-          }
-
-          let nextX = entry.x + vector.dx;
-          let nextY = entry.y + vector.dy;
-
-          if (nextX < FIELD_X_MIN || nextX > FIELD_X_MAX) {
-            vector.dx *= -1;
-            nextX = clamp(entry.x + vector.dx, FIELD_X_MIN, FIELD_X_MAX);
-          }
-
-          if (nextY < FIELD_Y_MIN || nextY > FIELD_Y_MAX) {
-            vector.dy *= -1;
-            nextY = clamp(entry.y + vector.dy, FIELD_Y_MIN, FIELD_Y_MAX);
-          }
-
-          vector.stepsLeft -= 1;
-          movementState.randomVectors.set(entry.id, vector);
-
-          return {
-            ...entry,
-            x: nextX,
-            y: nextY,
-          };
-        });
-
-        return nextPositions;
-      });
-    }, RANDOM_DRIFT_INTERVAL_MS);
-
-    return () => clearInterval(timer);
-  }, [players.length, activeVestPlayerId]);
-
-  const handleConnectionChange = React.useCallback(
-    (isConnected) => {
-      setPlayers((prev) =>
-        prev.map((player) => {
-          if (player.id !== activeVestPlayerId) {
-            return player;
-          }
-
-          return {
-            ...player,
-            online: isConnected,
-          };
-        }),
-      );
-    },
-    [activeVestPlayerId],
-  );
-
-  const wsConnected = useSingleVestTelemetry(
-    activeVestPlayerId,
-    handleMockSocketMessage,
-    handleConnectionChange,
-  );
-
-  const handleStartMatch = React.useCallback(() => {
-    if (matchState === "Active") {
-      return;
-    }
-
-    playWhistle(START_MATCH_WHISTLE_SRC);
-    setMatchState("Active");
-    setMatchStartedAt(Date.now());
-  }, [matchState]);
-
-  const handleEndMatch = React.useCallback(() => {
-    if (matchState !== "Active") {
-      return;
-    }
-
-    playWhistle(END_MATCH_WHISTLE_SRC);
-    setMatchState("Idle");
-  }, [matchState]);
-
-  const openPlayer = (id) => {
-    window.location.hash = `#/player/${id}`;
-  };
-
-  const backToTeam = () => {
-    window.location.hash = "#/";
-  };
-
-  const handlePlayerClick = (id) => {
-    if (!profile) {
-      pushToast("Complete athlete setup first.", "info");
-      return;
-    }
-
-    if (!activeVestPlayerId) {
-      setActiveVestPlayerId(id);
-      movementStateRef.current.headingDeg = DEFAULT_HEADING_DEG;
-      movementStateRef.current.lastUpdateTs = null;
-      setMatchState("Idle");
-      setMatchStartedAt(null);
-      setPlayers((prev) =>
-        prev.map((player) => {
-          if (player.id !== id) {
-            return { ...player, online: false };
-          }
-
-          return {
-            ...player,
-            name: profile.name,
-            jerseyNumber: profile.jerseyNumber,
-            heightCm: profile.heightCm,
-            weightKg: profile.weightKg,
-            age: profile.age,
-            online: false,
-          };
-        }),
-      );
-      pushToast(
-        `Vest assigned to ${profile.name}. Waiting for actual vest connection...`,
-        "info",
-      );
-      openPlayer(id);
-      return;
-    }
-
-    if (activeVestPlayerId !== id) {
-      pushToast(
-        "Only one vest is active. Open the selected vest player to view live telemetry.",
-        "info",
-      );
-      return;
-    }
-
-    openPlayer(id);
-  };
-
-  const selectedPlayer =
-    route.name === "player" ? players.find((p) => p.id === route.id) : null;
-
-  useEffect(() => {
-    if (window.location.hash === "") {
-      window.location.hash = "#/";
-    }
-  }, []);
-
-  useEffect(() => {
-    if (route.name !== "player") {
-      return;
-    }
-
-    if (!selectedPlayer || selectedPlayer.id !== activeVestPlayerId) {
-      pushToast("Only the active vest player can open Dashboard 1.", "info");
-      backToTeam();
-    }
-  }, [route.name, selectedPlayer, activeVestPlayerId, pushToast]);
-
-  return (
-    <main
-      className={`app-root min-h-screen p-4 md:p-8 ${route.name === "player" ? "player-view" : ""}`}
-    >
-      <div className="mx-auto max-w-7xl">
-        {route.name === "team" && (
-          <TeamOverview
-            players={players}
-            activeVestPlayerId={activeVestPlayerId}
-            playerPositions={playerPositionsMap}
-            onPlayerClick={handlePlayerClick}
-          />
-        )}
-
-        {route.name === "player" &&
-          selectedPlayer &&
-          selectedPlayer.id === activeVestPlayerId && (
-            <PlayerDetail
-              player={selectedPlayer}
-              connected={wsConnected}
-              onBack={backToTeam}
-              matchState={matchState}
-              matchStartedAt={matchStartedAt}
-              onStartMatch={handleStartMatch}
-              onEndMatch={handleEndMatch}
-            />
-          )}
-      </div>
-
-      {!profile && <AthleteSetupModal onSubmit={handleProfileSubmit} />}
-      <ToastLayer toasts={toasts} dismiss={dismissToast} />
-    </main>
-  );
+  panel.appendChild(textarea);
+  return panel;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+function renderPlayerDetail(player) {
+  const section = createElement("section");
+
+  section.appendChild(renderDashboardHeader(player));
+  section.appendChild(renderMatchControls());
+  section.appendChild(renderTelemetryGrid(player));
+  section.appendChild(renderMatchReport(player));
+
+  return section;
+}
+
+function render() {
+  if (!dom.root) {
+    return;
+  }
+
+  if (state.route.name === "player") {
+    const selectedPlayer = getSelectedPlayer();
+    if (!selectedPlayer || selectedPlayer.id !== state.activeVestPlayerId) {
+      pushToast("Only the active vest player can open Dashboard 1.", "info");
+      backToTeam();
+      return;
+    }
+  }
+
+  dom.root.innerHTML = "";
+
+  const main = createElement("main", {
+    className: `app-root min-h-screen p-4 md:p-8 ${state.route.name === "player" ? "player-view" : ""}`,
+  });
+
+  const wrapper = createElement("div", { className: "mx-auto max-w-7xl" });
+
+  if (state.route.name === "team") {
+    wrapper.appendChild(renderTeamOverview());
+  } else {
+    const selectedPlayer = getSelectedPlayer();
+    if (selectedPlayer) {
+      wrapper.appendChild(renderPlayerDetail(selectedPlayer));
+    }
+  }
+
+  main.appendChild(wrapper);
+
+  if (!state.profile) {
+    main.appendChild(renderAthleteSetupModal());
+  }
+
+  dom.root.appendChild(main);
+}
+
+function handleHashChange() {
+  state.route = parseHashRoute();
+  render();
+}
+
+function setActiveVestOffline() {
+  if (!state.activeVestPlayerId) {
+    return;
+  }
+
+  state.players = state.players.map((player) => {
+    if (player.id !== state.activeVestPlayerId) {
+      return player;
+    }
+
+    return {
+      ...player,
+      online: false,
+    };
+  });
+}
+
+function startConnectionGuard() {
+  setInterval(() => {
+    if (!state.activeVestPlayerId) {
+      return;
+    }
+
+    const activePlayer = state.players.find(
+      (p) => p.id === state.activeVestPlayerId,
+    );
+    if (!activePlayer) {
+      return;
+    }
+
+    const stale =
+      !activePlayer.lastSeen || Date.now() - activePlayer.lastSeen > 4000;
+    if (stale && activePlayer.online) {
+      setActiveVestOffline();
+      render();
+    }
+  }, 1200);
+}
+
+function startClockRefresh() {
+  setInterval(() => {
+    if (state.route.name === "player" && state.matchStartedAt) {
+      render();
+    }
+  }, 1000);
+}
+
+function init() {
+  ensureToastLayer();
+
+  if (!window.location.hash) {
+    window.location.hash = "#/";
+  }
+
+  state.route = parseHashRoute();
+
+  window.addEventListener("hashchange", handleHashChange);
+  window.addEventListener("beforeunload", () => {
+    disconnectVestSocket();
+    state.toasts.forEach((toast, id) => {
+      removeToast(id);
+    });
+  });
+
+  startRandomDrift();
+  startConnectionGuard();
+  startClockRefresh();
+  render();
+}
+
+init();
