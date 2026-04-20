@@ -392,3 +392,187 @@ body {
     font-size: 0.74rem;
   }
 }
+
+/* Hidden but renderable host used by html2pdf().from(element). */
+.pdf-export-host {
+  position: fixed;
+  top: 0;
+  left: -200vw;
+  width: 210mm;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.pdf-export-sheet {
+  --pdf-brand: #0f5fa8;
+  --pdf-brand-soft: #e9f2fb;
+  --pdf-text: #1e293b;
+  --pdf-muted: #64748b;
+  --pdf-border: #d7e2ef;
+  margin: 0;
+  min-height: 297mm;
+  padding: 14mm 12mm;
+  color: var(--pdf-text);
+  font-family: "Inter", "Roboto", "Segoe UI", Tahoma, sans-serif;
+  background:
+    radial-gradient(circle at 8% 10%, rgba(15, 95, 168, 0.08), transparent 34%),
+    radial-gradient(
+      circle at 92% 85%,
+      rgba(15, 95, 168, 0.07),
+      transparent 30%
+    ),
+    repeating-linear-gradient(
+      145deg,
+      rgba(15, 95, 168, 0.02) 0,
+      rgba(15, 95, 168, 0.02) 2px,
+      rgba(255, 255, 255, 0) 2px,
+      rgba(255, 255, 255, 0) 18px
+    ),
+    #f7fafd;
+}
+
+.pdf-export-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 2px solid var(--pdf-border);
+}
+
+.pdf-export-brand {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.pdf-export-logo {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #dde8f5;
+}
+
+.pdf-export-kicker {
+  margin: 0;
+  font-size: 0.74rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--pdf-brand);
+  font-weight: 700;
+}
+
+.pdf-export-title {
+  margin: 0.2rem 0 0;
+  font-size: 1.22rem;
+  line-height: 1.3;
+  color: #0b3f71;
+}
+
+.pdf-export-date {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--pdf-muted);
+  font-weight: 600;
+}
+
+.pdf-section {
+  margin-top: 0.9rem;
+  padding: 0.72rem 0.8rem;
+  border: 1px solid var(--pdf-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.84);
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.pdf-section h2 {
+  margin: 0 0 0.65rem;
+  font-size: 1rem;
+  color: var(--pdf-brand);
+  border-left: 4px solid var(--pdf-brand);
+  padding-left: 0.52rem;
+}
+
+.pdf-export-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.pdf-export-profile-grid div {
+  border: 1px solid var(--pdf-border);
+  border-radius: 9px;
+  padding: 0.45rem 0.55rem;
+  background: #ffffff;
+}
+
+.pdf-export-profile-grid span {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--pdf-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.2rem;
+}
+
+.pdf-export-profile-grid strong {
+  font-size: 0.86rem;
+}
+
+.pdf-export-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.pdf-export-table th,
+.pdf-export-table td {
+  text-align: left;
+  padding: 0.56rem 0.62rem;
+  border-bottom: 1px solid var(--pdf-border);
+  font-size: 0.84rem;
+}
+
+.pdf-export-table thead th {
+  color: #ffffff;
+  background: linear-gradient(90deg, #0f5fa8, #1f78c4);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.pdf-export-table tbody tr:nth-child(even) {
+  background: var(--pdf-brand-soft);
+}
+
+.pdf-export-md {
+  line-height: 1.62;
+}
+
+.pdf-export-md h1,
+.pdf-export-md h2,
+.pdf-export-md h3,
+.pdf-export-md h4 {
+  color: var(--pdf-brand);
+}
+
+.pdf-export-md p {
+  margin: 0.45rem 0;
+}
+
+.pdf-export-md ul,
+.pdf-export-md ol {
+  margin: 0.45rem 0 0.55rem 1.1rem;
+}
+
+.pdf-export-md code {
+  background: #edf3fb;
+  color: #0b3f71;
+  border-radius: 5px;
+  padding: 0.08rem 0.22rem;
+}

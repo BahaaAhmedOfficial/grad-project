@@ -64,6 +64,11 @@ const ENGLISH_PLAYER_NAMES = [
   "Jacob Wells",
 ];
 
+// AI response cache by telemetry snapshot
+const aiCache = new Map();
+const aiPendingRequests = new Map();
+const AI_PROXY_URL = "";
+
 const FORMATION_4_4_3 = [
   { top: "83%", left: "50%" },
   { top: "67%", left: "18%" },
@@ -357,23 +362,284 @@ function getMetricCardStyle(metricKey) {
   return { "--metric-card-bg": `url("${backgroundImage}")` };
 }
 
-function exportMatchPdf(player, summary) {
-  const jsPdfApi = window.jspdf;
-  if (!jsPdfApi || !jsPdfApi.jsPDF) {
-    window.alert("PDF library failed to load.");
+async function testAPIKey() {
+  console.log("Testing backend Gemini connectivity...");
+
+  try {
+    const response = await fetch(`${AI_PROXY_URL}/api/health`);
+    const data = await response.json();
+
+    if (!response.ok) {
+      alert(
+        "Backend/API test failed\nStatus: " +
+          response.status +
+          "\nError: " +
+          (data.error || "Unknown error"),
+      );
+      return false;
+    }
+
+    alert("Backend/API test passed\n\n" + data.message);
+    return true;
+  } catch (error) {
+    alert("Cannot reach backend API.\n\n" + error.message);
+    return false;
+  }
+}
+
+async function generateAISuggestions(player, summary) {
+  // Cache responses for unchanged telemetry to avoid repeated AI calls.
+  const cacheKey = JSON.stringify({ telemetry: player.telemetry, summary });
+  if (aiCache.has(cacheKey)) {
+    return aiCache.get(cacheKey);
+  }
+
+  // Hard dedupe: if an identical request is already in flight, reuse it.
+  if (aiPendingRequests.has(cacheKey)) {
+    return aiPendingRequests.get(cacheKey);
+  }
+
+  const payload = {
+    player: {
+      id: player.id,
+      name: player.name,
+      jerseyNumber: player.jerseyNumber,
+      heightCm: player.heightCm,
+      weightKg: player.weightKg,
+      age: player.age,
+      sessionDurationText: player.sessionDurationText,
+      samplesCaptured: player.samplesCaptured,
+      telemetry: {
+        heartRate: player.telemetry?.heartRate ?? null,
+        spo2: player.telemetry?.spo2 ?? null,
+        bodyTemp: player.telemetry?.bodyTemp ?? null,
+        muscleFatigue: player.telemetry?.muscleFatigue ?? null,
+        acceleration: player.telemetry?.acceleration ?? null,
+        speed: player.telemetry?.speed ?? null,
+        ecg: player.telemetry?.ecg ?? null,
+        gyroX: player.telemetry?.gyroX ?? null,
+        gyroY: player.telemetry?.gyroY ?? null,
+        gyroZ: player.telemetry?.gyroZ ?? null,
+      },
+    },
+    summary: summary || "",
+  };
+
+  const requestPromise = (async () => {
+    let response;
+    try {
+      response = await fetch(`${AI_PROXY_URL}/api/analyze-report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      throw new Error(
+        "AI analysis unavailable. Ensure backend API is reachable.",
+      );
+    }
+
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = {};
+    }
+
+    if (response.status === 429) {
+      const quotaError = new Error("System busy, please wait 30 seconds");
+      quotaError.code = "RATE_LIMITED";
+      throw quotaError;
+    }
+
+    if (!response.ok) {
+      throw new Error(data.error || "Unknown backend error");
+    }
+
+    const suggestions = data.suggestions || "No suggestions returned.";
+    aiCache.set(cacheKey, suggestions);
+    return suggestions;
+  })();
+
+  aiPendingRequests.set(cacheKey, requestPromise);
+
+  try {
+    return await requestPromise;
+  } finally {
+    aiPendingRequests.delete(cacheKey);
+  }
+}
+
+function escapeHtml(text) {
+  if (text === null || text === undefined) {
+    return "";
+  }
+
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function markdownToHtml(markdown) {
+  if (window.marked && typeof window.marked.parse === "function") {
+    return window.marked.parse(markdown || "", {
+      gfm: true,
+      breaks: true,
+    });
+  }
+
+  return `<pre>${escapeHtml(markdown || "")}</pre>`;
+}
+
+function createPdfExportTemplate(player, summary, suggestions) {
+  const reportDate = new Date().toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+
+  const telemetryRows = [
+    { label: "Heart Rate", key: "heartRate", unit: "bpm" },
+    { label: "SpO2", key: "spo2", unit: "%" },
+    { label: "Body Temp", key: "bodyTemp", unit: "degC" },
+    { label: "Muscle Fatigue", key: "muscleFatigue", unit: "Hz" },
+    { label: "Acceleration", key: "acceleration", unit: "m/s2" },
+    { label: "Speed", key: "speed", unit: "m/s" },
+    { label: "ECG", key: "ecg", unit: "mV" },
+    { label: "Gyro X", key: "gyroX", unit: "deg/s" },
+    { label: "Gyro Y", key: "gyroY", unit: "deg/s" },
+    { label: "Gyro Z", key: "gyroZ", unit: "deg/s" },
+  ];
+
+  const rowsHtml = telemetryRows
+    .map((metric) => {
+      const value = player.telemetry?.[metric.key];
+      const display =
+        value === null || value === undefined
+          ? "--"
+          : formatMetric(value, metric.key);
+
+      return `
+        <tr>
+          <td>${escapeHtml(metric.label)}</td>
+          <td>${escapeHtml(display)}</td>
+          <td>${escapeHtml(metric.unit)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  const coachSummaryHtml = markdownToHtml(
+    summary || "No coach summary provided.",
+  );
+  const aiSummaryHtml = markdownToHtml(
+    suggestions || "No AI suggestions returned.",
+  );
+
+  const host = document.createElement("div");
+  host.className = "pdf-export-host";
+  host.innerHTML = `
+    <article class="pdf-export-sheet">
+      <header class="pdf-export-header">
+        <div class="pdf-export-brand">
+          <img src="assets/logo.png" alt="Athlete Telemetry Logo" class="pdf-export-logo" />
+          <div>
+            <p class="pdf-export-kicker">Athlete Telemetry System</p>
+            <h1 class="pdf-export-title">Match Medical Performance Report</h1>
+          </div>
+        </div>
+        <p class="pdf-export-date">Report Date: ${escapeHtml(reportDate)}</p>
+      </header>
+
+      <section class="pdf-section pdf-export-profile">
+        <h2>Athlete Profile</h2>
+        <div class="pdf-export-profile-grid">
+          <div><span>Name</span><strong>${escapeHtml(player.name || "-")}</strong></div>
+          <div><span>Jersey</span><strong>#${escapeHtml(player.jerseyNumber || "-")}</strong></div>
+          <div><span>Height</span><strong>${escapeHtml(player.heightCm || "-")} cm</strong></div>
+          <div><span>Weight</span><strong>${escapeHtml(player.weightKg || "-")} kg</strong></div>
+          <div><span>Age</span><strong>${escapeHtml(player.age || "-")}</strong></div>
+          <div><span>Session</span><strong>${escapeHtml(player.sessionDurationText || "00:00")}</strong></div>
+        </div>
+      </section>
+
+      <section class="pdf-section">
+        <h2>Telemetry Snapshot</h2>
+        <table class="pdf-export-table">
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Value</th>
+              <th>Unit</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="pdf-section pdf-export-md">
+        <h2>Coach Summary</h2>
+        ${coachSummaryHtml}
+      </section>
+
+      <section class="pdf-section pdf-export-md">
+        <h2>AI Analysis and Recommendations</h2>
+        ${aiSummaryHtml}
+      </section>
+    </article>
+  `;
+
+  return host;
+}
+
+async function exportMatchPdf(player, summary) {
+  if (!window.html2pdf) {
+    window.alert("html2pdf library failed to load.");
     return;
   }
 
-  const doc = new jsPdfApi.jsPDF();
-  const lines = doc.splitTextToSize(summary, 180);
+  let suggestions;
+  try {
+    suggestions = await generateAISuggestions(player, summary);
+  } catch (error) {
+    if (error?.code === "RATE_LIMITED") {
+      window.alert("System busy, please wait 30 seconds");
+      return;
+    }
 
-  doc.setFontSize(16);
-  doc.text("Athlete Telemetry System", 14, 16);
-  doc.setFontSize(12);
-  doc.text(`Match Report - ${player.name}`, 14, 26);
-  doc.setFontSize(10);
-  doc.text(lines, 14, 38);
-  doc.save(`${player.name.replace(/\s+/g, "_")}_match_report.pdf`);
+    window.alert(error.message || "AI analysis failed. Please try again.");
+    return;
+  }
+
+  const exportElement = createPdfExportTemplate(player, summary, suggestions);
+  document.body.appendChild(exportElement);
+
+  const options = {
+    margin: [10, 10, 12, 10],
+    filename: `${player.name.replace(/\s+/g, "_")}_match_report.pdf`,
+    image: { type: "jpeg", quality: 0.98 },
+    html2canvas: {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: "#f4f7fb",
+    },
+    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+    pagebreak: {
+      mode: ["css", "legacy"],
+      avoid: ["tr", ".pdf-section h2"],
+    },
+  };
+
+  try {
+    await window.html2pdf().set(options).from(exportElement).save();
+  } finally {
+    exportElement.remove();
+  }
 }
 
 function playWhistle(src) {
@@ -677,16 +943,45 @@ function TelemetryGrid({ telemetry }) {
 }
 
 function MatchReport({ player, matchState, summary, setSummary, onExport }) {
+  const [isExporting, setIsExporting] = useState(false);
+  const exportClickLockRef = useRef(false);
+
+  const handleExport = async (event) => {
+    if (exportClickLockRef.current || isExporting) {
+      return;
+    }
+
+    exportClickLockRef.current = true;
+
+    // Disable immediately at click time to prevent rapid double submissions.
+    const clickedButton = event?.currentTarget;
+    if (event?.currentTarget) {
+      event.currentTarget.disabled = true;
+      event.currentTarget.textContent = "Generating AI Report...";
+    }
+
+    setIsExporting(true);
+    try {
+      await onExport();
+    } finally {
+      exportClickLockRef.current = false;
+      setIsExporting(false);
+      if (clickedButton) {
+        clickedButton.disabled = false;
+      }
+    }
+  };
+
   return (
     <section className="glass-panel mt-5 space-y-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-lg font-bold text-slate-900">Match Report</h2>
         <button
-          onClick={onExport}
-          disabled={!summary.trim()}
+          onClick={handleExport}
+          disabled={!summary.trim() || isExporting}
           className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-45"
         >
-          Export to PDF
+          {isExporting ? "Generating AI Report..." : "Export to PDF"}
         </button>
       </div>
 
@@ -762,7 +1057,8 @@ function PlayerDetail({
     );
   };
 
-  const exportPdf = () => exportMatchPdf(playerWithDuration, summary);
+  const exportPdf = async () =>
+    await exportMatchPdf(playerWithDuration, summary);
 
   return (
     <section>
