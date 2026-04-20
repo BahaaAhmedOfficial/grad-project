@@ -96,6 +96,7 @@ const state = {
     disposed: false,
     connected: false,
   },
+  exportLock: false,
   movement: {
     headingDeg: DEFAULT_HEADING_DEG,
     lastUpdateTs: null,
@@ -1388,48 +1389,56 @@ function createPdfExportTemplate(player, summary, suggestions) {
   return host;
 }
 
-async function exportMatchPdf(player, summary) {
+async function exportMatchPdf(player, summary, button, originalText) {
   if (!window.html2pdf) {
     window.alert("html2pdf library failed to load.");
     return;
   }
 
-  let suggestions;
   try {
-    suggestions = await generateAISuggestions(player, summary);
-  } catch (error) {
-    if (error?.code === "RATE_LIMITED") {
-      window.alert("System busy, please wait 30 seconds");
+    let suggestions;
+    try {
+      suggestions = await generateAISuggestions(player, summary);
+    } catch (error) {
+      if (error?.code === "RATE_LIMITED") {
+        window.alert("System busy, please wait 30 seconds");
+        return;
+      }
+
+      window.alert(error.message || "AI analysis failed. Please try again.");
       return;
     }
 
-    window.alert(error.message || "AI analysis failed. Please try again.");
-    return;
-  }
+    const exportElement = createPdfExportTemplate(player, summary, suggestions);
+    document.body.appendChild(exportElement);
 
-  const exportElement = createPdfExportTemplate(player, summary, suggestions);
-  document.body.appendChild(exportElement);
+    const options = {
+      margin: [10, 10, 12, 10],
+      filename: `${player.name.replace(/\s+/g, "_")}_match_report.pdf`,
+      image: { type: "jpeg", quality: 0.98 },
+      html2canvas: {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#f4f7fb",
+      },
+      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+      pagebreak: {
+        mode: ["css", "legacy"],
+        avoid: ["tr", ".pdf-section h2"],
+      },
+    };
 
-  const options = {
-    margin: [10, 10, 12, 10],
-    filename: `${player.name.replace(/\s+/g, "_")}_match_report.pdf`,
-    image: { type: "jpeg", quality: 0.98 },
-    html2canvas: {
-      scale: 2,
-      useCORS: true,
-      backgroundColor: "#f4f7fb",
-    },
-    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-    pagebreak: {
-      mode: ["css", "legacy"],
-      avoid: ["tr", ".pdf-section h2"],
-    },
-  };
-
-  try {
     await window.html2pdf().set(options).from(exportElement).save();
   } finally {
-    exportElement.remove();
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText || "Export to PDF";
+    }
+
+    const floatingExport = document.querySelector(".pdf-export-host");
+    if (floatingExport) {
+      floatingExport.remove();
+    }
   }
 }
 
@@ -1451,36 +1460,16 @@ function renderMatchReport(player) {
 
   const summaryText = getPlayerSummary(player);
   const sessionDurationText = getSessionDurationText();
-  const playerWithDuration = { ...player, sessionDurationText };
-
-  const isExporting = state.exportInFlightByPlayer.has(player.id);
 
   const exportButton = createElement("button", {
     className:
       "rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-45",
-    text: isExporting ? "Generating AI Report..." : "Export to PDF",
+    text: state.exportLock ? "Generating AI Report..." : "Export to PDF",
     attrs: {
-      disabled: !summaryText.trim() || isExporting ? "" : null,
+      disabled: !summaryText.trim() || state.exportLock ? "" : null,
+      "data-action": "export-report",
+      "data-player-id": String(player.id),
     },
-  });
-
-  exportButton.addEventListener("click", async (event) => {
-    if (state.exportInFlightByPlayer.has(player.id)) {
-      return;
-    }
-
-    state.exportInFlightByPlayer.add(player.id);
-
-    const button = event.currentTarget;
-    button.disabled = true;
-    button.textContent = "Generating AI Report...";
-
-    try {
-      await exportMatchPdf(playerWithDuration, summaryText);
-    } finally {
-      state.exportInFlightByPlayer.delete(player.id);
-      render();
-    }
   });
 
   top.appendChild(exportButton);
@@ -1626,6 +1615,7 @@ function init() {
   state.route = parseHashRoute();
 
   window.addEventListener("hashchange", handleHashChange);
+  document.addEventListener("click", handleDocumentClick);
   window.addEventListener("beforeunload", () => {
     disconnectVestSocket();
     state.toasts.forEach((toast, id) => {
@@ -1637,6 +1627,40 @@ function init() {
   startConnectionGuard();
   startClockRefresh();
   render();
+}
+
+function handleDocumentClick(event) {
+  const button = event.target.closest('[data-action="export-report"]');
+  if (!button) {
+    return;
+  }
+
+  if (state.exportLock) {
+    return;
+  }
+
+  const playerId = Number(button.getAttribute("data-player-id"));
+  const player = state.players.find((entry) => entry.id === playerId);
+  if (!player) {
+    return;
+  }
+
+  state.exportLock = true;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Generating AI Report...";
+
+  const playerWithDuration = {
+    ...player,
+    sessionDurationText: getSessionDurationText(),
+  };
+  const summaryText = getPlayerSummary(player);
+
+  exportMatchPdf(playerWithDuration, summaryText, button, originalText).finally(
+    () => {
+      state.exportLock = false;
+    },
+  );
 }
 
 init();
