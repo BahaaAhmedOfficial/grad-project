@@ -528,7 +528,7 @@ function ensureToastLayer() {
   }
 
   dom.toastLayer = createElement("div", {
-    className: "fixed right-4 top-4 z-50 space-y-2 w-[min(92vw,26rem)]",
+    className: "fixed left-4 top-4 z-50 space-y-2 w-[min(92vw,26rem)]",
   });
 
   document.body.appendChild(dom.toastLayer);
@@ -933,10 +933,6 @@ function handleTelemetryAlerts(evaluationResult) {
       now - previousWarning.at > WARNING_DEBOUNCE_MS;
 
     if (shouldNotifyWarning) {
-      pushToast(evaluationResult.warningMessages[0], "warning");
-      evaluationResult.warningMessages.forEach((message) => {
-        logToNotificationHistory(message, 2);
-      });
       state.physiological.warningDebounceByPlayer.set(playerId, {
         signature: warningSignature,
         at: now,
@@ -2658,7 +2654,7 @@ function renderMatchReport(player) {
     notificationHistory.appendChild(
       createElement("p", {
         className: "text-slate-500",
-        text: "No notification history yet. New Tier 2/Tier 3 alerts will appear here.",
+        text: "No critical history yet. New Tier 3 alerts will appear here.",
       }),
     );
   } else {
