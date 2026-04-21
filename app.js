@@ -1409,37 +1409,50 @@ async function exportMatchPdf(player, summary, button, originalText) {
       return;
     }
 
-    const exportElement = createPdfExportTemplate(player, summary, suggestions);
-    exportElement.style.position = "absolute";
-    exportElement.style.left = "-9999px";
-    exportElement.style.top = "0";
-    exportElement.style.pointerEvents = "none";
-    document.body.appendChild(exportElement);
+    const aiSummaryHtml = markdownToHtml(
+      suggestions || "No AI suggestions returned.",
+    );
+    const coachSummaryHtml = markdownToHtml(
+      summary || "No coach summary provided.",
+    );
 
-    const options = {
-      margin: [10, 10, 12, 10],
-      filename: `${player.name.replace(/\s+/g, "_")}_match_report.pdf`,
-      image: { type: "jpeg", quality: 0.98 },
-      html2canvas: {
-        scale: 2,
-        useCORS: true,
-        backgroundColor: "#f4f7fb",
-      },
-      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-      pagebreak: {
-        mode: ["css", "legacy"],
-        avoid: ["tr", ".pdf-section h2"],
-      },
-    };
+    const newContainer = document.createElement("div");
+    newContainer.style.cssText =
+      "width: 800px; padding: 40px; background: white; color: black; position: absolute; top: 0; left: 0; z-index: 9999; height: max-content; overflow: visible;";
+
+    newContainer.innerHTML = `
+      <div>
+        <h1 style="margin: 0 0 16px; font-size: 28px;">Match Medical Performance Report</h1>
+        <p style="margin: 0 0 22px;">Generated: ${escapeHtml(new Date().toLocaleString())}</p>
+
+        <h2 style="margin: 0 0 8px; font-size: 20px;">Athlete Profile</h2>
+        <p><strong>Name:</strong> ${escapeHtml(player.name || "-")}</p>
+        <p><strong>Jersey:</strong> #${escapeHtml(player.jerseyNumber || "-")}</p>
+        <p><strong>Height:</strong> ${escapeHtml(player.heightCm || "-")} cm</p>
+        <p><strong>Weight:</strong> ${escapeHtml(player.weightKg || "-")} kg</p>
+        <p><strong>Age:</strong> ${escapeHtml(player.age || "-")}</p>
+        <p><strong>Session Duration:</strong> ${escapeHtml(player.sessionDurationText || "00:00")}</p>
+        <p><strong>Samples Captured:</strong> ${escapeHtml(player.samplesCaptured || 0)}</p>
+
+        <h2 style="margin: 22px 0 8px; font-size: 20px;">Coach Summary</h2>
+        <div>${coachSummaryHtml}</div>
+
+        <h2 style="margin: 22px 0 8px; font-size: 20px;">AI Analysis and Recommendations</h2>
+        <div>${aiSummaryHtml}</div>
+      </div>
+    `;
+
+    document.body.appendChild(newContainer);
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
     await window
       .html2pdf()
-      .set(options)
-      .from(exportElement)
-      .save()
-      .then(() => {
-        if (exportElement.parentNode === document.body) {
-          document.body.removeChild(exportElement);
+      .set({ html2canvas: { scale: 2, useCORS: true, scrollY: 0 } })
+      .from(newContainer)
+      .save("Match_Report.pdf")
+      .finally(() => {
+        if (newContainer.parentNode === document.body) {
+          document.body.removeChild(newContainer);
         }
       });
   } finally {
