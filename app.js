@@ -11,6 +11,12 @@ const FIELD_Y_MAX = 86;
 const DEFAULT_HEADING_DEG = -90;
 const MOVEMENT_SPEED_TO_PERCENT_PER_SEC = 2.6;
 const RANDOM_DRIFT_INTERVAL_MS = 900;
+const SPO2_CRITICAL_HOLD_MS = 60000;
+const HR_RECOVERY_WINDOW_MS = 60000;
+const ECG_CRITICAL_WINDOW_MS = 3000;
+const WARNING_DEBOUNCE_MS = 9000;
+const CRITICAL_REOPEN_DEBOUNCE_MS = 10000;
+const ECG_BUFFER_SIZE = 1400;
 
 const METRIC_CONFIG = [
   { key: "heartRate", label: "Heart Rate", unit: "bpm" },
@@ -103,12 +109,33 @@ const state = {
     randomVectors: new Map(),
   },
   exportInFlightByPlayer: new Set(),
+  physiological: {
+    perPlayer: new Map(),
+    metricHighlightsByPlayer: new Map(),
+    warningDebounceByPlayer: new Map(),
+    criticalDebounceByPlayer: new Map(),
+    criticalModal: null,
+  },
+  ecgMonitor: {
+    buffer: new Float32Array(ECG_BUFFER_SIZE),
+    writeIndex: 0,
+    lastValue: 0,
+    canvas: null,
+    context: null,
+    gridCanvas: null,
+    animationFrameId: null,
+    gridKey: "",
+    visible: false,
+    drawLoopRunning: false,
+  },
 };
 
 const dom = {
   root: document.getElementById("root"),
   toastLayer: null,
 };
+
+const physiologyStateStore = new Map();
 
 function createElement(tagName, options = {}, children = []) {
   const node = document.createElement(tagName);
@@ -196,6 +223,24 @@ function normalizeTelemetryPayload(rawPayload) {
 
   const hasAnyValue = Object.values(telemetry).some((value) => value !== null);
   return hasAnyValue ? telemetry : null;
+}
+
+function normalizeECGSamples(rawPayload) {
+  const source =
+    typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload;
+  if (!source || typeof source !== "object") {
+    return [];
+  }
+
+  const rawSamples =
+    source.ecgSamples ?? source.ecgWave ?? source.ecgArray ?? source.ecg_buffer;
+  if (!Array.isArray(rawSamples)) {
+    return [];
+  }
+
+  return rawSamples
+    .map((sample) => toNumber(sample))
+    .filter((sample) => sample !== null);
 }
 
 function pickUniqueJerseys(count, reserved) {
@@ -404,7 +449,7 @@ function pushToast(message, level = "info") {
   const card = createElement(
     "div",
     {
-      className: `toast-card ${level === "critical" ? "critical" : "info"}`,
+      className: `toast-card ${level === "critical" ? "critical" : level === "warning" ? "warning" : "info"}`,
     },
     [row],
   );
@@ -418,6 +463,545 @@ function pushToast(message, level = "info") {
   }, TOAST_TIMEOUT_MS);
 
   state.toasts.set(id, { node: card, timer });
+}
+
+function getOrCreatePhysiologyState(playerId) {
+  if (!physiologyStateStore.has(playerId)) {
+    physiologyStateStore.set(playerId, {
+      spo2Below90Since: null,
+      sprintActive: false,
+      sprintStartedAt: null,
+      sprintEndedAt: null,
+      hrRecoveryDeadlineAt: null,
+      ecgAbove4Since: null,
+    });
+  }
+
+  return physiologyStateStore.get(playerId);
+}
+
+function evaluateTelemetry(data, playerProfile) {
+  const now = Date.now();
+  const playerId = Number(playerProfile?.id ?? state.activeVestPlayerId ?? 0);
+  if (!Number.isInteger(playerId) || playerId <= 0) {
+    return { currentTier: 1, messages: [] };
+  }
+
+  const playerState = getOrCreatePhysiologyState(playerId);
+  const age = Math.max(10, Number(playerProfile?.age) || 24);
+  const maxHR = 220 - age;
+
+  const heartRate = toNumber(data?.heartRate);
+  const spo2 = toNumber(data?.spo2);
+  const bodyTemp = toNumber(data?.bodyTemp);
+  const muscleFatigueDrop = toNumber(data?.muscleFatigue);
+  const acceleration = toNumber(data?.acceleration);
+  const ecg = toNumber(data?.ecg);
+
+  const metricTiers = {
+    heartRate: 1,
+    spo2: 1,
+    bodyTemp: 1,
+    muscleFatigue: 1,
+    acceleration: 1,
+    ecg: 1,
+  };
+
+  const warningMessages = [];
+  const criticalMessages = [];
+
+  const updateMetricTier = (metricKey, tier, message) => {
+    metricTiers[metricKey] = Math.max(metricTiers[metricKey], tier);
+    if (!message) {
+      return;
+    }
+    if (tier >= 3) {
+      criticalMessages.push(message);
+    } else if (tier === 2) {
+      warningMessages.push(message);
+    }
+  };
+
+  if (acceleration !== null) {
+    if (acceleration > 3.0) {
+      playerState.sprintActive = true;
+      playerState.sprintStartedAt = now;
+      playerState.hrRecoveryDeadlineAt = null;
+    }
+
+    if (playerState.sprintActive && acceleration < 1.5) {
+      playerState.sprintActive = false;
+      playerState.sprintEndedAt = now;
+      playerState.hrRecoveryDeadlineAt = now + HR_RECOVERY_WINDOW_MS;
+    }
+
+    if (acceleration > 8.0 || acceleration < -8.0) {
+      updateMetricTier(
+        "acceleration",
+        3,
+        `Critical impact spike detected (${formatMetric(acceleration, "acceleration")} m/s2).`,
+      );
+    } else if (acceleration < -3.0) {
+      updateMetricTier(
+        "acceleration",
+        2,
+        `Warning: deceleration load is high (${formatMetric(acceleration, "acceleration")} m/s2).`,
+      );
+    } else if (acceleration < -2.5 || acceleration > 4.0) {
+      updateMetricTier(
+        "acceleration",
+        2,
+        `Warning: acceleration is outside optimal training band (${formatMetric(acceleration, "acceleration")} m/s2).`,
+      );
+    }
+  }
+
+  if (heartRate !== null) {
+    if (heartRate > maxHR * 1.05) {
+      updateMetricTier(
+        "heartRate",
+        3,
+        `Critical: heart rate exceeded 105% of maxHR (${Math.round(heartRate)} bpm).`,
+      );
+    } else if (heartRate >= maxHR * 0.95) {
+      updateMetricTier(
+        "heartRate",
+        2,
+        `Warning: heart rate is in overload zone (${Math.round(heartRate)} bpm).`,
+      );
+    }
+
+    if (
+      playerState.hrRecoveryDeadlineAt &&
+      now >= playerState.hrRecoveryDeadlineAt
+    ) {
+      if (heartRate >= maxHR * 0.85) {
+        updateMetricTier(
+          "heartRate",
+          3,
+          `Critical: heart rate recovery failed after sprint (${Math.round(heartRate)} bpm at 60s).`,
+        );
+      }
+      playerState.hrRecoveryDeadlineAt = null;
+    }
+  }
+
+  if (spo2 !== null) {
+    if (spo2 < 90) {
+      if (!playerState.spo2Below90Since) {
+        playerState.spo2Below90Since = now;
+      }
+
+      if (now - playerState.spo2Below90Since > SPO2_CRITICAL_HOLD_MS) {
+        updateMetricTier(
+          "spo2",
+          3,
+          `Critical: SpO2 has remained below 90% for over 60s (${Math.round(spo2)}%).`,
+        );
+      } else {
+        updateMetricTier(
+          "spo2",
+          2,
+          `Warning: SpO2 is currently low (${Math.round(spo2)}%).`,
+        );
+      }
+    } else {
+      if (spo2 >= 90) {
+        playerState.spo2Below90Since = null;
+      }
+
+      if (spo2 <= 93) {
+        updateMetricTier(
+          "spo2",
+          2,
+          `Warning: SpO2 is in caution zone (${Math.round(spo2)}%).`,
+        );
+      }
+    }
+  }
+
+  if (bodyTemp !== null) {
+    if (bodyTemp >= 40.5) {
+      updateMetricTier(
+        "bodyTemp",
+        3,
+        `Critical: body temperature reached ${formatMetric(bodyTemp, "bodyTemp")} C.`,
+      );
+    } else if (bodyTemp >= 39.5) {
+      updateMetricTier(
+        "bodyTemp",
+        2,
+        `Warning: body temperature elevated to ${formatMetric(bodyTemp, "bodyTemp")} C.`,
+      );
+    }
+  }
+
+  if (muscleFatigueDrop !== null) {
+    if (muscleFatigueDrop >= 20) {
+      updateMetricTier(
+        "muscleFatigue",
+        3,
+        `Critical: muscle fatigue drop is ${formatMetric(muscleFatigueDrop, "muscleFatigue")}%`,
+      );
+    } else if (muscleFatigueDrop >= 11) {
+      updateMetricTier(
+        "muscleFatigue",
+        2,
+        `Warning: muscle fatigue drop is ${formatMetric(muscleFatigueDrop, "muscleFatigue")}%`,
+      );
+    }
+  }
+
+  if (ecg !== null) {
+    if (ecg > 4.0) {
+      if (!playerState.ecgAbove4Since) {
+        playerState.ecgAbove4Since = now;
+      }
+
+      if (now - playerState.ecgAbove4Since >= ECG_CRITICAL_WINDOW_MS) {
+        updateMetricTier(
+          "ecg",
+          3,
+          `Critical: ECG R-wave remained above 4.0 mV for 3 seconds (${formatMetric(ecg, "ecg")} mV).`,
+        );
+      } else {
+        updateMetricTier(
+          "ecg",
+          2,
+          `Warning: ECG R-wave is elevated (${formatMetric(ecg, "ecg")} mV).`,
+        );
+      }
+    } else {
+      playerState.ecgAbove4Since = null;
+      if (ecg < 0.5) {
+        updateMetricTier(
+          "ecg",
+          2,
+          `Warning: ECG R-wave is low (${formatMetric(ecg, "ecg")} mV).`,
+        );
+      } else if (ecg < 1.5 || ecg > 3.5) {
+        updateMetricTier(
+          "ecg",
+          2,
+          `Warning: ECG is outside baseline range (${formatMetric(ecg, "ecg")} mV).`,
+        );
+      }
+    }
+  }
+
+  const metricEntries = Object.entries(metricTiers);
+  const criticalMetricKeys = metricEntries
+    .filter(([, tier]) => tier >= 3)
+    .map(([key]) => key);
+  const warningMetricKeys = metricEntries
+    .filter(([, tier]) => tier === 2)
+    .map(([key]) => key);
+  const currentTier = Math.max(1, ...metricEntries.map(([, tier]) => tier));
+
+  state.physiological.metricHighlightsByPlayer.set(
+    playerId,
+    new Set(criticalMetricKeys),
+  );
+
+  return {
+    currentTier,
+    messages: [...criticalMessages, ...warningMessages],
+    playerId,
+    criticalMessages,
+    warningMessages,
+    criticalMetricKeys,
+    warningMetricKeys,
+    metricTiers,
+  };
+}
+
+function dismissCriticalModal() {
+  state.physiological.criticalModal = null;
+  render();
+}
+
+function handleTelemetryAlerts(evaluationResult) {
+  const now = Date.now();
+  const playerId = evaluationResult.playerId;
+  const warningSignature = evaluationResult.warningMessages.join("|");
+  const criticalSignature = evaluationResult.criticalMessages.join("|");
+
+  if (evaluationResult.currentTier === 2 && warningSignature) {
+    const previousWarning =
+      state.physiological.warningDebounceByPlayer.get(playerId);
+    const shouldNotifyWarning =
+      !previousWarning ||
+      previousWarning.signature !== warningSignature ||
+      now - previousWarning.at > WARNING_DEBOUNCE_MS;
+
+    if (shouldNotifyWarning) {
+      pushToast(evaluationResult.warningMessages[0], "warning");
+      state.physiological.warningDebounceByPlayer.set(playerId, {
+        signature: warningSignature,
+        at: now,
+      });
+    }
+  }
+
+  if (evaluationResult.currentTier >= 3 && criticalSignature) {
+    const previousCritical =
+      state.physiological.criticalDebounceByPlayer.get(playerId);
+    const shouldOpenCritical =
+      !previousCritical ||
+      previousCritical.signature !== criticalSignature ||
+      now - previousCritical.at > CRITICAL_REOPEN_DEBOUNCE_MS;
+
+    if (shouldOpenCritical) {
+      state.physiological.criticalModal = {
+        playerId,
+        title: "Critical Physiological Alert",
+        messages: evaluationResult.criticalMessages,
+      };
+
+      state.physiological.criticalDebounceByPlayer.set(playerId, {
+        signature: criticalSignature,
+        at: now,
+      });
+      render();
+    }
+  } else if (
+    state.physiological.criticalModal &&
+    state.physiological.criticalModal.playerId === playerId
+  ) {
+    state.physiological.criticalModal = null;
+    render();
+  }
+}
+
+function ensureECGGridCache(width, height, dpr) {
+  const ecgState = state.ecgMonitor;
+  const key = `${width}x${height}x${dpr}`;
+  if (ecgState.gridCanvas && ecgState.gridKey === key) {
+    return ecgState.gridCanvas;
+  }
+
+  const gridCanvas = document.createElement("canvas");
+  gridCanvas.width = Math.max(1, Math.floor(width * dpr));
+  gridCanvas.height = Math.max(1, Math.floor(height * dpr));
+
+  const gridContext = gridCanvas.getContext("2d");
+  if (!gridContext) {
+    return null;
+  }
+
+  gridContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  gridContext.fillStyle = "#050b1f";
+  gridContext.fillRect(0, 0, width, height);
+
+  gridContext.strokeStyle = "rgba(76, 108, 156, 0.25)";
+  gridContext.lineWidth = 1;
+
+  for (let x = 0; x <= width; x += 16) {
+    gridContext.beginPath();
+    gridContext.moveTo(x + 0.5, 0);
+    gridContext.lineTo(x + 0.5, height);
+    gridContext.stroke();
+  }
+
+  for (let y = 0; y <= height; y += 16) {
+    gridContext.beginPath();
+    gridContext.moveTo(0, y + 0.5);
+    gridContext.lineTo(width, y + 0.5);
+    gridContext.stroke();
+  }
+
+  gridContext.strokeStyle = "rgba(112, 141, 184, 0.38)";
+  gridContext.beginPath();
+  gridContext.moveTo(0, height / 2);
+  gridContext.lineTo(width, height / 2);
+  gridContext.stroke();
+
+  ecgState.gridCanvas = gridCanvas;
+  ecgState.gridKey = key;
+  return gridCanvas;
+}
+
+function renderECGFrame() {
+  const ecgState = state.ecgMonitor;
+  if (!ecgState.drawLoopRunning) {
+    return;
+  }
+
+  const canvas = ecgState.canvas;
+  if (!canvas || !ecgState.visible) {
+    ecgState.drawLoopRunning = false;
+    ecgState.animationFrameId = null;
+    return;
+  }
+
+  const context =
+    ecgState.context ||
+    (() => {
+      ecgState.context = canvas.getContext("2d");
+      return ecgState.context;
+    })();
+
+  if (!context) {
+    ecgState.drawLoopRunning = false;
+    ecgState.animationFrameId = null;
+    return;
+  }
+
+  const width = Math.max(1, Math.floor(canvas.clientWidth || 420));
+  const height = Math.max(1, Math.floor(canvas.clientHeight || 180));
+  const dpr = window.devicePixelRatio || 1;
+
+  if (
+    canvas.width !== Math.floor(width * dpr) ||
+    canvas.height !== Math.floor(height * dpr)
+  ) {
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    ecgState.gridCanvas = null;
+    ecgState.gridKey = "";
+  }
+
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const grid = ensureECGGridCache(width, height, dpr);
+  if (grid) {
+    context.drawImage(grid, 0, 0, width, height);
+  } else {
+    context.fillStyle = "#050b1f";
+    context.fillRect(0, 0, width, height);
+  }
+
+  const midY = height / 2;
+  const amplitudeScale = height / 7;
+  const samplesPerPixel = Math.max(1, Math.floor(ECG_BUFFER_SIZE / width));
+
+  context.lineWidth = 2;
+  context.strokeStyle = "#22c55e";
+  context.beginPath();
+
+  for (let x = width - 1; x >= 0; x -= 1) {
+    const sampleOffset = (width - 1 - x) * samplesPerPixel;
+    const index =
+      (ecgState.writeIndex - 1 - sampleOffset + ECG_BUFFER_SIZE) %
+      ECG_BUFFER_SIZE;
+    const value = ecgState.buffer[index] ?? 0;
+    const y = midY - value * amplitudeScale;
+
+    if (x === width - 1) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  }
+
+  context.stroke();
+
+  if (Math.abs(ecgState.lastValue) > 4.0) {
+    context.lineWidth = 2;
+    context.strokeStyle = "#ef4444";
+    context.beginPath();
+    context.moveTo(width - 36, 18);
+    context.lineTo(width - 6, 18);
+    context.stroke();
+  }
+
+  ecgState.animationFrameId = window.requestAnimationFrame(renderECGFrame);
+}
+
+function drawLiveECG(voltageArray) {
+  if (!Array.isArray(voltageArray) || !voltageArray.length) {
+    return;
+  }
+
+  const ecgState = state.ecgMonitor;
+
+  voltageArray.forEach((sample) => {
+    const numericSample = toNumber(sample);
+    if (numericSample === null) {
+      return;
+    }
+
+    ecgState.buffer[ecgState.writeIndex] = numericSample;
+    ecgState.writeIndex = (ecgState.writeIndex + 1) % ECG_BUFFER_SIZE;
+    ecgState.lastValue = numericSample;
+  });
+
+  if (ecgState.visible && !ecgState.drawLoopRunning) {
+    ecgState.drawLoopRunning = true;
+    ecgState.animationFrameId = window.requestAnimationFrame(renderECGFrame);
+  }
+}
+
+function setECGVisibility(isVisible) {
+  const ecgState = state.ecgMonitor;
+  ecgState.visible = isVisible;
+
+  if (isVisible) {
+    if (!ecgState.drawLoopRunning) {
+      ecgState.drawLoopRunning = true;
+      ecgState.animationFrameId = window.requestAnimationFrame(renderECGFrame);
+    }
+  } else {
+    ecgState.drawLoopRunning = false;
+    if (ecgState.animationFrameId) {
+      window.cancelAnimationFrame(ecgState.animationFrameId);
+      ecgState.animationFrameId = null;
+    }
+  }
+}
+
+function bindECGCanvasFromDOM() {
+  const ecgCanvas = document.querySelector('[data-role="ecg-live-canvas"]');
+  const ecgState = state.ecgMonitor;
+  if (!ecgCanvas) {
+    ecgState.canvas = null;
+    ecgState.context = null;
+    return;
+  }
+
+  ecgState.canvas = ecgCanvas;
+  ecgState.context = ecgCanvas.getContext("2d");
+
+  if (ecgState.visible && !ecgState.drawLoopRunning) {
+    ecgState.drawLoopRunning = true;
+    ecgState.animationFrameId = window.requestAnimationFrame(renderECGFrame);
+  }
+}
+
+function renderCriticalModal() {
+  const criticalModal = state.physiological.criticalModal;
+  if (!criticalModal) {
+    return null;
+  }
+
+  const overlay = createElement("div", {
+    className: "critical-overlay",
+  });
+
+  const panel = createElement("div", { className: "critical-panel" });
+  panel.appendChild(
+    createElement("h2", {
+      className: "critical-title",
+      text: criticalModal.title,
+    }),
+  );
+
+  const list = createElement("ul", { className: "critical-list" });
+  criticalModal.messages.forEach((message) => {
+    list.appendChild(createElement("li", { text: message }));
+  });
+  panel.appendChild(list);
+
+  panel.appendChild(
+    createElement("button", {
+      className: "critical-dismiss-btn",
+      text: "Acknowledge & Continue",
+      attrs: { "data-action": "dismiss-critical" },
+    }),
+  );
+
+  overlay.appendChild(panel);
+  return overlay;
 }
 
 function getSelectedPlayer() {
@@ -582,6 +1166,7 @@ function disconnectVestSocket() {
   }
 
   state.ws.connected = false;
+  setECGVisibility(false);
   updateActivePlayerOnline(false);
 }
 
@@ -621,12 +1206,22 @@ function connectVestSocket() {
 
     socket.addEventListener("message", (event) => {
       try {
-        const normalized = normalizeTelemetryPayload(event.data);
+        const parsed =
+          typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+        const normalized = normalizeTelemetryPayload(parsed);
+        const ecgSamples = normalizeECGSamples(parsed);
+
         if (!normalized) {
+          if (ecgSamples.length) {
+            drawLiveECG(ecgSamples);
+          }
           return;
         }
 
-        handleTelemetryPacket(state.activeVestPlayerId, normalized);
+        handleTelemetryPacket(state.activeVestPlayerId, {
+          ...normalized,
+          ecgSamples,
+        });
       } catch (error) {
         // Ignore malformed packets and continue listening.
       }
@@ -634,12 +1229,14 @@ function connectVestSocket() {
 
     socket.addEventListener("error", () => {
       state.ws.connected = false;
+      setECGVisibility(false);
       updateActivePlayerOnline(false);
       render();
     });
 
     socket.addEventListener("close", () => {
       state.ws.connected = false;
+      setECGVisibility(false);
       updateActivePlayerOnline(false);
       render();
 
@@ -658,6 +1255,11 @@ function connectVestSocket() {
 function handleTelemetryPacket(playerId, payload) {
   const now = Date.now();
   const movementState = state.movement;
+  const ecgSamples = Array.isArray(payload.ecgSamples)
+    ? payload.ecgSamples
+    : [];
+  const telemetryPayload = { ...payload };
+  delete telemetryPayload.ecgSamples;
 
   if (playerId === state.activeVestPlayerId) {
     const dtSeconds = movementState.lastUpdateTs
@@ -667,10 +1269,10 @@ function handleTelemetryPacket(playerId, payload) {
     movementState.lastUpdateTs = now;
 
     const gyroZ = toNumber(payload.gyroZ) ?? 0;
-    const speedFromPayload = toNumber(payload.speed);
+    const speedFromPayload = toNumber(telemetryPayload.speed);
     const acceleration =
-      toNumber(payload.acceleration) !== null
-        ? Math.abs(toNumber(payload.acceleration))
+      toNumber(telemetryPayload.acceleration) !== null
+        ? Math.abs(toNumber(telemetryPayload.acceleration))
         : null;
     const fallbackSpeed = acceleration !== null ? acceleration * 0.18 : 0;
     const speed = Math.max(0, speedFromPayload ?? fallbackSpeed);
@@ -704,15 +1306,21 @@ function handleTelemetryPacket(playerId, payload) {
       ...player,
       online: true,
       lastSeen: now,
-      telemetry: { ...player.telemetry, ...payload },
+      telemetry: { ...player.telemetry, ...telemetryPayload },
       samplesCaptured: player.samplesCaptured + 1,
     };
 
-    const criticalMessages = getCriticalMessages(
-      updated.name,
-      updated.telemetry,
-    );
-    criticalMessages.forEach((message) => pushToast(message, "critical"));
+    const evaluationResult = evaluateTelemetry(updated.telemetry, updated);
+    handleTelemetryAlerts(evaluationResult);
+
+    if (ecgSamples.length) {
+      drawLiveECG(ecgSamples);
+    } else if (
+      telemetryPayload.ecg !== null &&
+      telemetryPayload.ecg !== undefined
+    ) {
+      drawLiveECG([telemetryPayload.ecg]);
+    }
 
     return updated;
   });
@@ -1122,14 +1730,22 @@ function renderTelemetryGrid(player) {
     className: "grid gap-4 md:grid-cols-2 xl:grid-cols-3",
   });
 
-  const criticalFlags = getCriticalFlags(player.telemetry);
+  const highlightedMetrics =
+    state.physiological.metricHighlightsByPlayer.get(player.id) || new Set();
+  const ecgLiveActive =
+    state.ws.connected && player.id === state.activeVestPlayerId;
 
   METRIC_CONFIG.forEach((metric) => {
-    const style = getMetricCardStyle(metric.key);
+    const style =
+      metric.key === "ecg" && ecgLiveActive
+        ? {}
+        : getMetricCardStyle(metric.key);
+    const metricIsCritical = highlightedMetrics.has(metric.key);
 
     const card = createElement("article", {
-      className: `metric-card p-5 ${criticalFlags[metric.key] ? "critical" : ""}`,
+      className: `metric-card p-5 ${metricIsCritical ? "metric-critical-hl" : ""} ${metric.key === "ecg" && ecgLiveActive ? "ecg-live-active" : ""}`,
       style,
+      attrs: { "data-metric-key": metric.key },
     });
 
     card.appendChild(
@@ -1150,6 +1766,31 @@ function renderTelemetryGrid(player) {
         text: metric.unit,
       }),
     );
+
+    if (metric.key === "ecg") {
+      const ecgShell = createElement("div", {
+        className: `ecg-live-shell ${ecgLiveActive ? "active" : "inactive"}`,
+      });
+
+      const ecgCanvas = createElement("canvas", {
+        className: "ecg-live-canvas",
+        attrs: {
+          "data-role": "ecg-live-canvas",
+          "aria-label": "Live ECG waveform",
+        },
+      });
+
+      const ecgPlaceholder = createElement("p", {
+        className: "ecg-live-placeholder",
+        text: ecgLiveActive
+          ? "Streaming ECG waveform..."
+          : "ECG monitor idle. Connect vest to begin live waveform.",
+      });
+
+      ecgShell.appendChild(ecgCanvas);
+      ecgShell.appendChild(ecgPlaceholder);
+      card.appendChild(ecgShell);
+    }
 
     card.appendChild(valueRow);
     section.appendChild(card);
@@ -1839,7 +2480,19 @@ function render() {
     main.appendChild(renderAthleteSetupModal());
   }
 
+  const criticalModal = renderCriticalModal();
+  if (criticalModal) {
+    main.appendChild(criticalModal);
+  }
+
   dom.root.appendChild(main);
+
+  const shouldShowECG =
+    state.route.name === "player" &&
+    state.ws.connected &&
+    state.activeVestPlayerId === state.route.id;
+  bindECGCanvasFromDOM();
+  setECGVisibility(shouldShowECG);
 }
 
 function handleHashChange() {
@@ -1919,6 +2572,14 @@ function init() {
 }
 
 function handleDocumentClick(event) {
+  const dismissCriticalButton = event.target.closest(
+    '[data-action="dismiss-critical"]',
+  );
+  if (dismissCriticalButton) {
+    dismissCriticalModal();
+    return;
+  }
+
   const button = event.target.closest('[data-action="export-report"]');
   if (!button) {
     return;
