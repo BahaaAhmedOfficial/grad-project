@@ -1182,6 +1182,114 @@ function markdownToHtml(markdown) {
   return `<pre>${escapeHtml(markdown || "")}</pre>`;
 }
 
+function markdownInlineToPdfText(line) {
+  const parts = [];
+  const text = line || "";
+  const boldRegex = /\*\*(.*?)\*\*/g;
+  let cursor = 0;
+  let match;
+
+  while ((match = boldRegex.exec(text)) !== null) {
+    if (match.index > cursor) {
+      parts.push({ text: text.slice(cursor, match.index) });
+    }
+    parts.push({ text: match[1], bold: true });
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < text.length) {
+    parts.push({ text: text.slice(cursor) });
+  }
+
+  return parts.length ? parts : [{ text: "" }];
+}
+
+function markdownToPdfmakeContent(markdown) {
+  const source = String(markdown || "").replace(/\r\n/g, "\n");
+  const lines = source.split("\n");
+  const content = [];
+  let bulletBuffer = [];
+
+  const flushBullets = () => {
+    if (!bulletBuffer.length) {
+      return;
+    }
+    content.push({
+      ul: bulletBuffer.map((line) => ({
+        text: markdownInlineToPdfText(line),
+      })),
+      margin: [0, 2, 0, 6],
+    });
+    bulletBuffer = [];
+  };
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+
+    if (!line) {
+      flushBullets();
+      content.push({ text: "", margin: [0, 2, 0, 2] });
+      return;
+    }
+
+    if (line.startsWith("### ")) {
+      flushBullets();
+      content.push({
+        text: line.slice(4),
+        bold: true,
+        fontSize: 12,
+        margin: [0, 8, 0, 4],
+      });
+      return;
+    }
+
+    if (line.startsWith("## ")) {
+      flushBullets();
+      content.push({
+        text: line.slice(3),
+        bold: true,
+        fontSize: 13,
+        margin: [0, 10, 0, 5],
+      });
+      return;
+    }
+
+    if (line.startsWith("# ")) {
+      flushBullets();
+      content.push({
+        text: line.slice(2),
+        bold: true,
+        fontSize: 14,
+        margin: [0, 12, 0, 6],
+      });
+      return;
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      bulletBuffer.push(line.replace(/^[-*]\s+/, ""));
+      return;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      flushBullets();
+      content.push({
+        text: markdownInlineToPdfText(line),
+        margin: [0, 2, 0, 3],
+      });
+      return;
+    }
+
+    flushBullets();
+    content.push({
+      text: markdownInlineToPdfText(line),
+      margin: [0, 2, 0, 3],
+    });
+  });
+
+  flushBullets();
+  return content.length ? content : [{ text: "-" }];
+}
+
 async function testAPIKey() {
   try {
     const response = await fetch(`${AI_PROXY_URL}/api/health`);
@@ -1390,8 +1498,8 @@ function createPdfExportTemplate(player, summary, suggestions) {
 }
 
 async function exportMatchPdf(player, summary, button, originalText) {
-  if (!window.html2pdf) {
-    window.alert("html2pdf library failed to load.");
+  if (!window.pdfMake || typeof window.pdfMake.createPdf !== "function") {
+    window.alert("pdfmake library failed to load.");
     return;
   }
 
@@ -1409,52 +1517,109 @@ async function exportMatchPdf(player, summary, button, originalText) {
       return;
     }
 
-    const aiSummaryHtml = markdownToHtml(
-      suggestions || "No AI suggestions returned.",
-    );
-    const coachSummaryHtml = markdownToHtml(
-      summary || "No coach summary provided.",
-    );
+    const telemetryRows = [
+      { label: "Heart Rate", key: "heartRate", unit: "bpm" },
+      { label: "SpO2", key: "spo2", unit: "%" },
+      { label: "Body Temp", key: "bodyTemp", unit: "degC" },
+      { label: "Muscle Fatigue", key: "muscleFatigue", unit: "Hz" },
+      { label: "Acceleration", key: "acceleration", unit: "m/s2" },
+      { label: "Speed", key: "speed", unit: "m/s" },
+      { label: "ECG", key: "ecg", unit: "mV" },
+      { label: "Gyro X", key: "gyroX", unit: "deg/s" },
+      { label: "Gyro Y", key: "gyroY", unit: "deg/s" },
+      { label: "Gyro Z", key: "gyroZ", unit: "deg/s" },
+    ];
 
-    const newContainer = document.createElement("div");
-    newContainer.style.cssText =
-      "width: 800px; padding: 40px; background: white; color: black; position: absolute; top: 0; left: 0; z-index: 9999; height: max-content; overflow: visible;";
+    const telemetryTableBody = [
+      [
+        { text: "Metric", bold: true, fillColor: "#e2e8f0" },
+        { text: "Value", bold: true, fillColor: "#e2e8f0" },
+        { text: "Unit", bold: true, fillColor: "#e2e8f0" },
+      ],
+      ...telemetryRows.map((metric) => {
+        const value = player.telemetry?.[metric.key];
+        const display =
+          value === null || value === undefined
+            ? "--"
+            : formatMetric(value, metric.key);
+        return [metric.label, String(display), metric.unit];
+      }),
+    ];
 
-    newContainer.innerHTML = `
-      <div>
-        <h1 style="margin: 0 0 16px; font-size: 28px;">Match Medical Performance Report</h1>
-        <p style="margin: 0 0 22px;">Generated: ${escapeHtml(new Date().toLocaleString())}</p>
+    const profileRows = [
+      ["Name", String(player.name || "-")],
+      ["Jersey", `#${String(player.jerseyNumber || "-")}`],
+      ["Height", `${String(player.heightCm || "-")} cm`],
+      ["Weight", `${String(player.weightKg || "-")} kg`],
+      ["Age", String(player.age || "-")],
+      ["Session Duration", String(player.sessionDurationText || "00:00")],
+      ["Samples Captured", String(player.samplesCaptured || 0)],
+      ["Generated At", new Date().toLocaleString()],
+    ];
 
-        <h2 style="margin: 0 0 8px; font-size: 20px;">Athlete Profile</h2>
-        <p><strong>Name:</strong> ${escapeHtml(player.name || "-")}</p>
-        <p><strong>Jersey:</strong> #${escapeHtml(player.jerseyNumber || "-")}</p>
-        <p><strong>Height:</strong> ${escapeHtml(player.heightCm || "-")} cm</p>
-        <p><strong>Weight:</strong> ${escapeHtml(player.weightKg || "-")} kg</p>
-        <p><strong>Age:</strong> ${escapeHtml(player.age || "-")}</p>
-        <p><strong>Session Duration:</strong> ${escapeHtml(player.sessionDurationText || "00:00")}</p>
-        <p><strong>Samples Captured:</strong> ${escapeHtml(player.samplesCaptured || 0)}</p>
+    const docDefinition = {
+      pageSize: "A4",
+      pageMargins: [32, 38, 32, 38],
+      defaultStyle: {
+        fontSize: 10,
+      },
+      content: [
+        {
+          text: "Match Medical Performance Report",
+          fontSize: 18,
+          bold: true,
+          margin: [0, 0, 0, 12],
+        },
+        {
+          text: "Athlete Profile",
+          style: "sectionTitle",
+        },
+        {
+          table: {
+            widths: [140, "*"],
+            body: profileRows,
+          },
+          layout: "lightHorizontalLines",
+          margin: [0, 0, 0, 12],
+        },
+        {
+          text: "Telemetry Snapshot",
+          style: "sectionTitle",
+        },
+        {
+          table: {
+            headerRows: 1,
+            widths: ["*", 72, 56],
+            body: telemetryTableBody,
+          },
+          layout: "lightHorizontalLines",
+          margin: [0, 0, 0, 12],
+        },
+        {
+          text: "Coach Summary",
+          style: "sectionTitle",
+        },
+        ...markdownToPdfmakeContent(summary || "No coach summary provided."),
+        {
+          text: "AI Analysis and Recommendations",
+          style: "sectionTitle",
+          margin: [0, 12, 0, 6],
+        },
+        ...markdownToPdfmakeContent(
+          suggestions || "No AI suggestions returned.",
+        ),
+      ],
+      styles: {
+        sectionTitle: {
+          fontSize: 12,
+          bold: true,
+          color: "#0f172a",
+          margin: [0, 6, 0, 6],
+        },
+      },
+    };
 
-        <h2 style="margin: 22px 0 8px; font-size: 20px;">Coach Summary</h2>
-        <div>${coachSummaryHtml}</div>
-
-        <h2 style="margin: 22px 0 8px; font-size: 20px;">AI Analysis and Recommendations</h2>
-        <div>${aiSummaryHtml}</div>
-      </div>
-    `;
-
-    document.body.appendChild(newContainer);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    await window
-      .html2pdf()
-      .set({ html2canvas: { scale: 2, useCORS: true, scrollY: 0 } })
-      .from(newContainer)
-      .save("Match_Report.pdf")
-      .finally(() => {
-        if (newContainer.parentNode === document.body) {
-          document.body.removeChild(newContainer);
-        }
-      });
+    window.pdfMake.createPdf(docDefinition).download("Match_Report.pdf");
   } finally {
     if (button) {
       button.disabled = false;
