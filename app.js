@@ -1633,7 +1633,7 @@ async function exportMatchPdf(player, summary, button, originalText) {
 
     const docDefinition = {
       pageSize: "A4",
-      pageMargins: [32, 38, 32, 38],
+      pageMargins: [32, 100, 32, 38],
       defaultStyle: {
         fontSize: 10,
       },
@@ -1641,15 +1641,15 @@ async function exportMatchPdf(player, summary, button, originalText) {
         headerLogo
           ? {
               image: headerLogo,
-              width: 80,
-              absolutePosition: { x: 480, y: 30 },
+              width: 70,
+              absolutePosition: { x: 470, y: 25 },
             }
           : { text: "" },
         {
           text: "Match Medical Performance Report",
           fontSize: 18,
           bold: true,
-          margin: [0, 0, 0, 12],
+          margin: [0, 0, 0, 15],
         },
         {
           text: "Athlete Profile",
