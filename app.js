@@ -454,6 +454,10 @@ function refreshSimulationButton() {
     return;
   }
 
+  // Keep test control visible even when no hardware socket is connected.
+  button.classList.remove("hidden");
+  button.style.display = "inline-flex";
+
   button.className = isSimulating
     ? "rounded-xl border border-red-400/80 bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-red-950/30 transition hover:bg-red-500"
     : "rounded-xl border border-fuchsia-300/60 bg-fuchsia-500/10 px-4 py-2 text-sm font-semibold text-fuchsia-100 backdrop-blur-sm transition hover:border-fuchsia-200 hover:bg-fuchsia-500/20";
