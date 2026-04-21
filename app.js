@@ -83,6 +83,11 @@ const aiCache = new Map();
 const aiPendingRequests = new Map();
 const AI_PROXY_URL = "";
 
+let isSimulating = false;
+let simulationInterval;
+let simulationTick = 0;
+let simulationTemp = 37.0;
+
 const FORMATION_4_4_3 = [
   { top: "83%", left: "50%" },
   { top: "67%", left: "18%" },
@@ -145,6 +150,7 @@ const state = {
 const dom = {
   root: document.getElementById("root"),
   toastLayer: null,
+  simulateButton: document.getElementById("btn-simulate"),
 };
 
 const physiologyStateStore = new Map();
@@ -392,6 +398,47 @@ function getCriticalMessages(playerName, telemetry) {
   return alerts;
 }
 
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function generateMockTelemetry() {
+  simulationTick += 1;
+  const phase = simulationTick * 0.1;
+
+  const heartRate = Math.round(80 + ((Math.sin(phase) + 1) * 100) / 2);
+  const spo2 = Math.round(92 + Math.random() * 7);
+
+  simulationTemp += 0.015;
+  if (simulationTemp > 39.0) {
+    simulationTemp = 37.0;
+  }
+  const bodyTemp = Number(simulationTemp.toFixed(2));
+
+  const muscleFatigue = Number((5 + Math.random() * 10).toFixed(1));
+  const acceleration =
+    simulationTick % 24 === 0 ? 9.0 : Number((1 + Math.random()).toFixed(2));
+
+  const ecgSamples = Array.from({ length: 10 }, (_, index) => {
+    const wavePhase = phase + index * 0.32;
+    const value =
+      2.75 + 1.65 * Math.sin(wavePhase) + (Math.random() - 0.5) * 0.18;
+    return Number(clampNumber(value, 1.0, 4.5).toFixed(3));
+  });
+
+  return {
+    heartRate,
+    spo2,
+    bodyTemp,
+    muscleFatigue,
+    acceleration,
+    speed: Number((acceleration * 0.22).toFixed(2)),
+    gyroZ: Number((Math.sin(phase * 0.6) * 6).toFixed(2)),
+    ecg: ecgSamples[ecgSamples.length - 1],
+    ecgSamples,
+  };
+}
+
 function getMetricCardStyle(metricKey) {
   const backgroundImage = METRIC_CARD_BACKGROUNDS[metricKey];
   if (!backgroundImage) {
@@ -399,6 +446,69 @@ function getMetricCardStyle(metricKey) {
   }
 
   return { "--metric-card-bg": `url("${backgroundImage}")` };
+}
+
+function refreshSimulationButton() {
+  const button = dom.simulateButton;
+  if (!button) {
+    return;
+  }
+
+  button.className = isSimulating
+    ? "rounded-xl border border-red-400/80 bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-red-950/30 transition hover:bg-red-500"
+    : "rounded-xl border border-fuchsia-300/60 bg-fuchsia-500/10 px-4 py-2 text-sm font-semibold text-fuchsia-100 backdrop-blur-sm transition hover:border-fuchsia-200 hover:bg-fuchsia-500/20";
+  button.textContent = isSimulating ? "Stop Simulation" : "Simulate Vest";
+}
+
+function stopSimulation(markOffline = true) {
+  if (simulationInterval) {
+    clearInterval(simulationInterval);
+    simulationInterval = undefined;
+  }
+
+  isSimulating = false;
+
+  if (markOffline) {
+    state.ws.connected = false;
+    setECGVisibility(false);
+    updateActivePlayerOnline(false);
+  }
+
+  refreshSimulationButton();
+}
+
+function startSimulation() {
+  if (!state.activeVestPlayerId) {
+    pushToast("Select an active vest player before simulation.", "info");
+    return;
+  }
+
+  disconnectVestSocket();
+  state.ws.connected = false;
+  isSimulating = true;
+  refreshSimulationButton();
+
+  simulationInterval = window.setInterval(() => {
+    if (!state.activeVestPlayerId) {
+      stopSimulation(true);
+      render();
+      return;
+    }
+
+    const mockPacket = generateMockTelemetry();
+    handleTelemetryPacket(state.activeVestPlayerId, mockPacket);
+  }, 500);
+}
+
+function toggleSimulation() {
+  if (isSimulating) {
+    stopSimulation(true);
+    render();
+    return;
+  }
+
+  startSimulation();
+  render();
 }
 
 function playWhistle(src) {
@@ -1747,19 +1857,36 @@ function renderDashboardHeader(player) {
   );
 
   const connected = state.ws.connected && player.online;
+  const simulatingForPlayer =
+    isSimulating && player.id === state.activeVestPlayerId;
 
   const pill = createElement("div", {
-    className: `connection-pill ${connected ? "connected" : "disconnected"}`,
+    className: `connection-pill ${connected || simulatingForPlayer ? "connected" : "disconnected"}`,
   });
   pill.appendChild(createElement("span", { className: "status-dot" }));
   pill.appendChild(
     createElement("span", {
-      text: connected ? "Connected" : "Disconnected",
+      text: simulatingForPlayer
+        ? "Simulating Data"
+        : connected
+          ? "Connected"
+          : "Disconnected",
     }),
   );
 
+  const right = createElement("div", {
+    className: "flex flex-col items-end gap-2",
+  });
+  right.appendChild(pill);
+
+  if (dom.simulateButton) {
+    refreshSimulationButton();
+    dom.simulateButton.classList.remove("hidden");
+    right.appendChild(dom.simulateButton);
+  }
+
   header.appendChild(left);
-  header.appendChild(pill);
+  header.appendChild(right);
   return header;
 }
 
@@ -2659,6 +2786,10 @@ function startClockRefresh() {
 function init() {
   ensureToastLayer();
 
+  if (dom.simulateButton) {
+    dom.simulateButton.addEventListener("click", toggleSimulation);
+  }
+
   if (!window.location.hash) {
     window.location.hash = "#/";
   }
@@ -2668,6 +2799,7 @@ function init() {
   window.addEventListener("hashchange", handleHashChange);
   document.addEventListener("click", handleDocumentClick);
   window.addEventListener("beforeunload", () => {
+    stopSimulation(false);
     disconnectVestSocket();
     state.toasts.forEach((toast, id) => {
       removeToast(id);
