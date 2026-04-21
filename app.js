@@ -1410,6 +1410,10 @@ async function exportMatchPdf(player, summary, button, originalText) {
     }
 
     const exportElement = createPdfExportTemplate(player, summary, suggestions);
+    exportElement.style.position = "absolute";
+    exportElement.style.left = "-9999px";
+    exportElement.style.top = "0";
+    exportElement.style.pointerEvents = "none";
     document.body.appendChild(exportElement);
 
     const options = {
@@ -1428,16 +1432,20 @@ async function exportMatchPdf(player, summary, button, originalText) {
       },
     };
 
-    await window.html2pdf().set(options).from(exportElement).save();
+    await window
+      .html2pdf()
+      .set(options)
+      .from(exportElement)
+      .save()
+      .then(() => {
+        if (exportElement.parentNode === document.body) {
+          document.body.removeChild(exportElement);
+        }
+      });
   } finally {
     if (button) {
       button.disabled = false;
       button.textContent = originalText || "Export to PDF";
-    }
-
-    const floatingExport = document.querySelector(".pdf-export-host");
-    if (floatingExport) {
-      floatingExport.remove();
     }
   }
 }
