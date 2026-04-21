@@ -1585,6 +1585,45 @@ async function exportMatchPdf(player, summary, button, originalText) {
       ["Generated At", new Date().toLocaleString()],
     ];
 
+    const theme = {
+      ink: "#08112a",
+      sky: "#0f3e7b",
+      grass: "#1f7a3f",
+      accent: "#0f5fa8",
+      border: "#cccccc",
+      rowAlt: "#f0f4f8",
+    };
+
+    const closedTableLayout = {
+      hLineWidth: function (i, node) {
+        return 1;
+      },
+      vLineWidth: function (i, node) {
+        return 1;
+      },
+      hLineColor: function (i, node) {
+        return theme.border;
+      },
+      vLineColor: function (i, node) {
+        return theme.border;
+      },
+      paddingLeft: function (i, node) {
+        return 8;
+      },
+      paddingRight: function (i, node) {
+        return 8;
+      },
+      paddingTop: function (i, node) {
+        return 6;
+      },
+      paddingBottom: function (i, node) {
+        return 6;
+      },
+      fillColor: function (rowIndex, node, columnIndex) {
+        return rowIndex % 2 === 0 ? null : theme.rowAlt;
+      },
+    };
+
     let headerLogo = "";
     try {
       headerLogo = await getBase64ImageFromURL("assets/headerLogo.png");
@@ -1621,7 +1660,7 @@ async function exportMatchPdf(player, summary, button, originalText) {
             widths: [140, "*"],
             body: profileRows,
           },
-          layout: "lightHorizontalLines",
+          layout: closedTableLayout,
           margin: [0, 0, 0, 12],
         },
         {
@@ -1632,9 +1671,31 @@ async function exportMatchPdf(player, summary, button, originalText) {
           table: {
             headerRows: 1,
             widths: ["*", 72, 56],
-            body: telemetryTableBody,
+            body: [
+              [
+                {
+                  text: "Metric",
+                  fillColor: theme.sky,
+                  color: "#ffffff",
+                  bold: true,
+                },
+                {
+                  text: "Value",
+                  fillColor: theme.sky,
+                  color: "#ffffff",
+                  bold: true,
+                },
+                {
+                  text: "Unit",
+                  fillColor: theme.sky,
+                  color: "#ffffff",
+                  bold: true,
+                },
+              ],
+              ...telemetryTableBody.slice(1),
+            ],
           },
-          layout: "lightHorizontalLines",
+          layout: closedTableLayout,
           margin: [0, 0, 0, 12],
         },
         {
@@ -1653,10 +1714,10 @@ async function exportMatchPdf(player, summary, button, originalText) {
       ],
       styles: {
         sectionTitle: {
-          fontSize: 12,
+          fontSize: 14,
           bold: true,
-          color: "#0f172a",
-          margin: [0, 6, 0, 6],
+          color: theme.sky,
+          margin: [0, 10, 0, 6],
         },
       },
     };
