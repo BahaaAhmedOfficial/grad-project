@@ -123,6 +123,7 @@ const state = {
   physiological: {
     perPlayer: new Map(),
     metricHighlightsByPlayer: new Map(),
+    notificationHistoryByPlayer: new Map(),
     warningDebounceByPlayer: new Map(),
     criticalDebounceByPlayer: new Map(),
     criticalModal: null,
@@ -731,6 +732,78 @@ function dismissCriticalModal() {
   render();
 }
 
+function getNotificationHistoryForPlayer(playerId) {
+  if (!state.physiological.notificationHistoryByPlayer.has(playerId)) {
+    state.physiological.notificationHistoryByPlayer.set(playerId, []);
+  }
+
+  return state.physiological.notificationHistoryByPlayer.get(playerId);
+}
+
+function renderNotificationHistoryEntry(entry) {
+  const tagClass =
+    entry.tier >= 3
+      ? "bg-red-100 text-red-700 border-red-300"
+      : "bg-amber-100 text-amber-700 border-amber-300";
+  const tagText = entry.tier >= 3 ? "Tier 3 Critical" : "Tier 2 Warning";
+
+  const row = createElement("div", {
+    className:
+      "flex items-start gap-2 border-b border-slate-200 py-2 text-sm text-slate-800",
+  });
+
+  row.appendChild(
+    createElement("span", {
+      className:
+        "shrink-0 rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600",
+      text: entry.time,
+    }),
+  );
+
+  row.appendChild(
+    createElement("span", {
+      className: `shrink-0 rounded border px-2 py-0.5 text-xs font-semibold ${tagClass}`,
+      text: tagText,
+    }),
+  );
+
+  row.appendChild(
+    createElement("span", {
+      className: "leading-5",
+      text: entry.message,
+    }),
+  );
+
+  return row;
+}
+
+function logToNotificationHistory(message, tier) {
+  const playerId = Number(state.activeVestPlayerId || 0);
+  if (!playerId || !message) {
+    return;
+  }
+
+  const history = getNotificationHistoryForPlayer(playerId);
+  const entry = {
+    time: new Date().toLocaleTimeString(),
+    tier,
+    message,
+  };
+
+  history.push(entry);
+  if (history.length > 300) {
+    history.shift();
+  }
+
+  const historyContainer = document.getElementById("notification-history");
+  if (!historyContainer) {
+    return;
+  }
+
+  historyContainer.appendChild(renderNotificationHistoryEntry(entry));
+  historyContainer.scrollTop = historyContainer.scrollHeight;
+}
+
 function handleTelemetryAlerts(evaluationResult) {
   const now = Date.now();
   const playerId = evaluationResult.playerId;
@@ -747,6 +820,9 @@ function handleTelemetryAlerts(evaluationResult) {
 
     if (shouldNotifyWarning) {
       pushToast(evaluationResult.warningMessages[0], "warning");
+      evaluationResult.warningMessages.forEach((message) => {
+        logToNotificationHistory(message, 2);
+      });
       state.physiological.warningDebounceByPlayer.set(playerId, {
         signature: warningSignature,
         at: now,
@@ -763,6 +839,9 @@ function handleTelemetryAlerts(evaluationResult) {
       now - previousCritical.at > CRITICAL_REOPEN_DEBOUNCE_MS;
 
     if (shouldOpenCritical) {
+      evaluationResult.criticalMessages.forEach((message) => {
+        logToNotificationHistory(message, 3);
+      });
       state.physiological.criticalModal = {
         playerId,
         title: "Critical Physiological Alert",
@@ -1810,30 +1889,6 @@ function renderTelemetryGrid(player) {
   return section;
 }
 
-function escapeHtml(text) {
-  if (text === null || text === undefined) {
-    return "";
-  }
-
-  return String(text)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function markdownToHtml(markdown) {
-  if (window.marked && typeof window.marked.parse === "function") {
-    return window.marked.parse(markdown || "", {
-      gfm: true,
-      breaks: true,
-    });
-  }
-
-  return `<pre>${escapeHtml(markdown || "")}</pre>`;
-}
-
 function getBase64ImageFromURL(url) {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -2128,109 +2183,6 @@ async function saveMatchReportToDB(
   }
 }
 
-function createPdfExportTemplate(player, summary, suggestions) {
-  const reportDate = new Date().toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-
-  const telemetryRows = [
-    { label: "Heart Rate", key: "heartRate", unit: "bpm" },
-    { label: "SpO2", key: "spo2", unit: "%" },
-    { label: "Body Temp", key: "bodyTemp", unit: "degC" },
-    { label: "Muscle Fatigue", key: "muscleFatigue", unit: "Hz" },
-    { label: "Acceleration", key: "acceleration", unit: "m/s2" },
-    { label: "Speed", key: "speed", unit: "m/s" },
-    { label: "ECG", key: "ecg", unit: "mV" },
-    { label: "Gyro X", key: "gyroX", unit: "deg/s" },
-    { label: "Gyro Y", key: "gyroY", unit: "deg/s" },
-    { label: "Gyro Z", key: "gyroZ", unit: "deg/s" },
-  ];
-
-  const rowsHtml = telemetryRows
-    .map((metric) => {
-      const value = player.telemetry?.[metric.key];
-      const display =
-        value === null || value === undefined
-          ? "--"
-          : formatMetric(value, metric.key);
-
-      return `
-        <tr>
-          <td>${escapeHtml(metric.label)}</td>
-          <td>${escapeHtml(display)}</td>
-          <td>${escapeHtml(metric.unit)}</td>
-        </tr>
-      `;
-    })
-    .join("");
-
-  const coachSummaryHtml = markdownToHtml(
-    summary || "No coach summary provided.",
-  );
-  const aiSummaryHtml = markdownToHtml(
-    suggestions || "No AI suggestions returned.",
-  );
-
-  const host = document.createElement("div");
-  host.className = "pdf-export-host";
-  host.innerHTML = `
-    <article class="pdf-export-sheet">
-      <header class="pdf-export-header">
-        <div class="pdf-export-brand">
-          <img src="assets/logo.png" alt="Athlete Telemetry Logo" class="pdf-export-logo" />
-          <div>
-            <p class="pdf-export-kicker">Athlete Telemetry System</p>
-            <h1 class="pdf-export-title">Match Medical Performance Report</h1>
-          </div>
-        </div>
-        <p class="pdf-export-date">Report Date: ${escapeHtml(reportDate)}</p>
-      </header>
-
-      <section class="pdf-section pdf-export-profile">
-        <h2>Athlete Profile</h2>
-        <div class="pdf-export-profile-grid">
-          <div><span>Name</span><strong>${escapeHtml(player.name || "-")}</strong></div>
-          <div><span>Jersey</span><strong>#${escapeHtml(player.jerseyNumber || "-")}</strong></div>
-          <div><span>Height</span><strong>${escapeHtml(player.heightCm || "-")} cm</strong></div>
-          <div><span>Weight</span><strong>${escapeHtml(player.weightKg || "-")} kg</strong></div>
-          <div><span>Age</span><strong>${escapeHtml(player.age || "-")}</strong></div>
-          <div><span>Session</span><strong>${escapeHtml(player.sessionDurationText || "00:00")}</strong></div>
-        </div>
-      </section>
-
-      <section class="pdf-section">
-        <h2>Telemetry Snapshot</h2>
-        <table class="pdf-export-table">
-          <thead>
-            <tr>
-              <th>Metric</th>
-              <th>Value</th>
-              <th>Unit</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rowsHtml}
-          </tbody>
-        </table>
-      </section>
-
-      <section class="pdf-section pdf-export-md">
-        <h2>Coach Summary</h2>
-        ${coachSummaryHtml}
-      </section>
-
-      <section class="pdf-section pdf-export-md">
-        <h2>AI Analysis and Recommendations</h2>
-        ${aiSummaryHtml}
-      </section>
-    </article>
-  `;
-
-  return host;
-}
-
 async function exportMatchPdf(player, summary, button, originalText) {
   if (!window.pdfMake || typeof window.pdfMake.createPdf !== "function") {
     window.alert("pdfmake library failed to load.");
@@ -2238,6 +2190,7 @@ async function exportMatchPdf(player, summary, button, originalText) {
   }
 
   try {
+    const exportTimestamp = new Date().toLocaleString();
     let suggestions;
     try {
       suggestions = await generateAISuggestions(player, summary);
@@ -2280,103 +2233,145 @@ async function exportMatchPdf(player, summary, button, originalText) {
       }),
     ];
 
-    const profileRows = [
-      ["Name", String(player.name || "-")],
-      ["Jersey", `#${String(player.jerseyNumber || "-")}`],
-      ["Height", `${String(player.heightCm || "-")} cm`],
-      ["Weight", `${String(player.weightKg || "-")} kg`],
-      ["Age", String(player.age || "-")],
-      ["Session Duration", String(player.sessionDurationText || "00:00")],
-      ["Samples Captured", String(player.samplesCaptured || 0)],
-      ["Generated At", new Date().toLocaleString()],
-    ];
-
     const theme = {
       ink: "#08112a",
       sky: "#0f3e7b",
-      grass: "#1f7a3f",
-      accent: "#0f5fa8",
-      border: "#cccccc",
-      rowAlt: "#f0f4f8",
+      critical: "#cf2f2f",
+      muted: "#6b7280",
+      softPanel: "#f3f4f6",
+      rowAlt: "#f8fafc",
+      border: "#d1d5db",
     };
 
-    const closedTableLayout = {
-      hLineWidth: function (i, node) {
-        return 1;
+    const samplesCaptured = Number(player.samplesCaptured || 0);
+
+    const profileSessionGrid = [
+      [
+        { text: "Name", style: "fieldLabel" },
+        { text: String(player.name || "-"), style: "fieldValue" },
+        { text: "Jersey", style: "fieldLabel" },
+        { text: `#${String(player.jerseyNumber || "-")}`, style: "fieldValue" },
+      ],
+      [
+        { text: "Age", style: "fieldLabel" },
+        { text: String(player.age || "-"), style: "fieldValue" },
+        { text: "Height", style: "fieldLabel" },
+        { text: `${String(player.heightCm || "-")} cm`, style: "fieldValue" },
+      ],
+      [
+        { text: "Weight", style: "fieldLabel" },
+        { text: `${String(player.weightKg || "-")} kg`, style: "fieldValue" },
+        { text: "Duration", style: "fieldLabel" },
+        {
+          text: String(player.sessionDurationText || "00:00"),
+          style: "fieldValue",
+        },
+      ],
+      [
+        { text: "Samples Captured", style: "fieldLabel" },
+        { text: String(samplesCaptured), style: "fieldValue" },
+        { text: "", style: "fieldLabel" },
+        { text: "", style: "fieldValue" },
+      ],
+    ];
+
+    const profilePanelLayout = {
+      hLineWidth: function () {
+        return 0;
       },
-      vLineWidth: function (i, node) {
-        return 1;
+      vLineWidth: function () {
+        return 0;
       },
-      hLineColor: function (i, node) {
-        return theme.border;
-      },
-      vLineColor: function (i, node) {
-        return theme.border;
-      },
-      paddingLeft: function (i, node) {
-        return 8;
-      },
-      paddingRight: function (i, node) {
-        return 8;
-      },
-      paddingTop: function (i, node) {
+      paddingLeft: function () {
         return 6;
       },
-      paddingBottom: function (i, node) {
+      paddingRight: function () {
         return 6;
       },
-      fillColor: function (rowIndex, node, columnIndex) {
-        return rowIndex % 2 === 0 ? null : theme.rowAlt;
+      paddingTop: function () {
+        return 6;
+      },
+      paddingBottom: function () {
+        return 6;
+      },
+      fillColor: function () {
+        return theme.softPanel;
       },
     };
 
-    let headerLogo = "";
-    try {
-      headerLogo = await getBase64ImageFromURL("assets/headerLogo.png");
-    } catch (error) {
-      headerLogo = "";
-    }
+    const telemetryTableLayout = {
+      hLineWidth: function () {
+        return 1;
+      },
+      vLineWidth: function () {
+        return 1;
+      },
+      hLineColor: function () {
+        return theme.border;
+      },
+      vLineColor: function () {
+        return theme.border;
+      },
+      paddingLeft: function () {
+        return 8;
+      },
+      paddingRight: function () {
+        return 8;
+      },
+      paddingTop: function () {
+        return 6;
+      },
+      paddingBottom: function () {
+        return 6;
+      },
+      fillColor: function (rowIndex) {
+        if (rowIndex === 0) {
+          return null;
+        }
+        return rowIndex % 2 === 0 ? theme.rowAlt : null;
+      },
+    };
 
     const docDefinition = {
       pageSize: "A4",
-      pageMargins: [32, 100, 32, 38],
+      pageMargins: [32, 42, 32, 38],
       defaultStyle: {
-        fontSize: 10,
+        fontSize: 11,
+        color: theme.ink,
       },
       content: [
-        headerLogo
-          ? {
-              image: headerLogo,
-              width: 70,
-              absolutePosition: { x: 470, y: 25 },
-            }
-          : { text: "" },
         {
-          text: "Match Medical Performance Report",
-          fontSize: 18,
-          bold: true,
-          margin: [0, 0, 0, 15],
-        },
-        {
-          text: "Athlete Profile",
-          style: "sectionTitle",
-        },
-        {
-          table: {
-            widths: [140, "*"],
-            body: profileRows,
-          },
-          layout: closedTableLayout,
+          columns: [
+            {
+              width: "*",
+              text: "Elite Athlete Telemetry Report",
+              style: "reportTitle",
+            },
+            {
+              width: "auto",
+              text: `Exported: ${exportTimestamp}`,
+              style: "exportStamp",
+              alignment: "right",
+            },
+          ],
           margin: [0, 0, 0, 12],
         },
         {
-          text: "Telemetry Snapshot",
-          style: "sectionTitle",
+          table: {
+            widths: [90, "*", 90, "*"],
+            body: profileSessionGrid,
+          },
+          layout: profilePanelLayout,
+          margin: [0, 0, 0, 14],
+        },
+        {
+          text: "Raw Telemetry Snapshot",
+          style: "sectionHeader",
         },
         {
           table: {
             headerRows: 1,
-            widths: ["*", 72, 56],
+            widths: ["*", 86, 62],
             body: [
               [
                 {
@@ -2401,29 +2396,57 @@ async function exportMatchPdf(player, summary, button, originalText) {
               ...telemetryTableBody.slice(1),
             ],
           },
-          layout: closedTableLayout,
-          margin: [0, 0, 0, 12],
+          layout: telemetryTableLayout,
+          margin: [0, 0, 0, 8],
         },
+        ...(samplesCaptured === 0
+          ? [
+              {
+                text: "SYSTEM NOTE: Zero samples captured. Verify hardware connection.",
+                style: "criticalNote",
+                margin: [0, 0, 0, 12],
+              },
+            ]
+          : []),
         {
-          text: "Coach Summary",
-          style: "sectionTitle",
-        },
-        ...markdownToPdfmakeContent(summary || "No coach summary provided."),
-        {
-          text: "AI Analysis and Recommendations",
-          style: "sectionTitle",
-          margin: [0, 12, 0, 6],
+          text: "AI Clinical Synthesis & Recovery Plan",
+          style: "sectionHeader",
+          margin: [0, 10, 0, 6],
         },
         ...markdownToPdfmakeContent(
           suggestions || "No AI suggestions returned.",
         ),
       ],
       styles: {
-        sectionTitle: {
+        reportTitle: {
+          fontSize: 16,
+          bold: true,
+          color: theme.sky,
+        },
+        exportStamp: {
+          fontSize: 10,
+          italics: true,
+          color: theme.muted,
+        },
+        sectionHeader: {
           fontSize: 14,
           bold: true,
           color: theme.sky,
-          margin: [0, 10, 0, 6],
+          margin: [0, 6, 0, 6],
+        },
+        fieldLabel: {
+          fontSize: 10,
+          bold: true,
+          color: theme.sky,
+        },
+        fieldValue: {
+          fontSize: 11,
+          color: theme.ink,
+        },
+        criticalNote: {
+          fontSize: 11,
+          bold: true,
+          color: theme.critical,
         },
       },
     };
@@ -2493,18 +2516,28 @@ function renderMatchReport(player) {
     }),
   );
 
-  const textarea = createElement("textarea", {
+  const notificationHistory = createElement("div", {
     className:
-      "w-full rounded-xl border border-slate-300 bg-white/95 p-3 text-sm leading-6 text-slate-800 outline-none ring-0 focus:border-sky-500",
-    attrs: { rows: "8", placeholder: "Telemetry Summary..." },
+      "h-56 w-full overflow-y-auto rounded-xl border border-slate-300 bg-white p-3 font-mono text-sm leading-6 text-slate-800 shadow-inner",
+    attrs: { id: "notification-history" },
   });
 
-  textarea.value = summaryText;
-  textarea.addEventListener("input", (event) => {
-    setPlayerSummary(player.id, event.target.value);
-  });
+  const history = getNotificationHistoryForPlayer(player.id);
+  if (!history.length) {
+    notificationHistory.appendChild(
+      createElement("p", {
+        className: "text-slate-500",
+        text: "No notification history yet. New Tier 2/Tier 3 alerts will appear here.",
+      }),
+    );
+  } else {
+    history.forEach((entry) => {
+      notificationHistory.appendChild(renderNotificationHistoryEntry(entry));
+    });
+  }
 
-  panel.appendChild(textarea);
+  panel.appendChild(notificationHistory);
+  notificationHistory.scrollTop = notificationHistory.scrollHeight;
   return panel;
 }
 
