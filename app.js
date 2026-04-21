@@ -18,6 +18,17 @@ const WARNING_DEBOUNCE_MS = 9000;
 const CRITICAL_REOPEN_DEBOUNCE_MS = 10000;
 const ECG_BUFFER_SIZE = 1400;
 
+const SUPABASE_URL = "https://doahbvwljbrjbduhhbtb.supabase.co";
+const SUPABASE_PUBLISHABLE_KEY =
+  "sb_publishable_2ZRNKUPXJuy51hgQ2K_4-g_UOQnbDq8";
+const supabaseClient =
+  window.supabase &&
+  typeof window.supabase.createClient === "function" &&
+  SUPABASE_URL &&
+  SUPABASE_PUBLISHABLE_KEY
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
+    : null;
+
 const METRIC_CONFIG = [
   { key: "heartRate", label: "Heart Rate", unit: "bpm" },
   { key: "spo2", label: "Blood Oxygen", unit: "%" },
@@ -2063,6 +2074,60 @@ async function generateAISuggestions(player, summary) {
   }
 }
 
+async function saveMatchReportToDB(
+  playerProfile,
+  telemetrySummary,
+  aiSuggestions,
+) {
+  if (!supabaseClient) {
+    console.error(
+      "Supabase client is not initialized. Check SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY.",
+    );
+    return;
+  }
+
+  try {
+    const maxHeartRateSource =
+      telemetrySummary?.maxHeartRate ??
+      telemetrySummary?.max_heart_rate ??
+      playerProfile?.telemetry?.heartRate ??
+      null;
+
+    const parsedAge = Number(playerProfile?.age);
+    const parsedMaxHeartRate = Number(maxHeartRateSource);
+
+    const fallbackCriticalAlerts = getCriticalMessages(
+      playerProfile?.name || "Unknown Player",
+      playerProfile?.telemetry || {},
+    );
+
+    const criticalAlertsTriggered =
+      telemetrySummary?.criticalAlertsTriggered ??
+      telemetrySummary?.critical_alerts_triggered ??
+      fallbackCriticalAlerts;
+
+    const row = {
+      player_name: String(playerProfile?.name || "Unknown Player"),
+      age: Number.isFinite(parsedAge) ? Math.round(parsedAge) : null,
+      max_heart_rate: Number.isFinite(parsedMaxHeartRate)
+        ? Math.round(parsedMaxHeartRate)
+        : null,
+      critical_alerts_triggered: criticalAlertsTriggered,
+      raw_ai_summary: String(aiSuggestions || ""),
+    };
+
+    const { error } = await supabaseClient.from("match_reports").insert([row]);
+
+    if (error) {
+      throw error;
+    }
+
+    console.log("Match report saved to DB successfully.", row);
+  } catch (error) {
+    console.error("Failed to save match report to DB:", error);
+  }
+}
+
 function createPdfExportTemplate(player, summary, suggestions) {
   const reportDate = new Date().toLocaleDateString(undefined, {
     year: "numeric",
@@ -2362,6 +2427,17 @@ async function exportMatchPdf(player, summary, button, originalText) {
         },
       },
     };
+
+    const telemetrySummaryPayload = {
+      maxHeartRate: player.telemetry?.heartRate ?? null,
+      criticalAlertsTriggered: getCriticalMessages(
+        player.name || "Unknown Player",
+        player.telemetry || {},
+      ),
+      coachSummary: summary || "",
+    };
+
+    await saveMatchReportToDB(player, telemetrySummaryPayload, suggestions);
 
     window.pdfMake.createPdf(docDefinition).download("Match_Report.pdf");
   } finally {
