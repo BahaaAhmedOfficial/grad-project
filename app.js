@@ -1182,6 +1182,34 @@ function markdownToHtml(markdown) {
   return `<pre>${escapeHtml(markdown || "")}</pre>`;
 }
 
+function getBase64ImageFromURL(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth || image.width;
+        canvas.height = image.naturalHeight || image.height;
+
+        const context = canvas.getContext("2d");
+        if (!context) {
+          reject(new Error("Unable to create canvas context."));
+          return;
+        }
+
+        context.drawImage(image, 0, 0);
+        resolve(canvas.toDataURL("image/png"));
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    image.onerror = () => reject(new Error(`Failed to load image: ${url}`));
+    image.src = url;
+  });
+}
+
 function markdownInlineToPdfText(line) {
   const parts = [];
   const text = line || "";
@@ -1557,6 +1585,13 @@ async function exportMatchPdf(player, summary, button, originalText) {
       ["Generated At", new Date().toLocaleString()],
     ];
 
+    let headerLogo = "";
+    try {
+      headerLogo = await getBase64ImageFromURL("assets/headerLogo.png");
+    } catch (error) {
+      headerLogo = "";
+    }
+
     const docDefinition = {
       pageSize: "A4",
       pageMargins: [32, 38, 32, 38],
@@ -1564,6 +1599,13 @@ async function exportMatchPdf(player, summary, button, originalText) {
         fontSize: 10,
       },
       content: [
+        headerLogo
+          ? {
+              image: headerLogo,
+              width: 80,
+              absolutePosition: { x: 480, y: 30 },
+            }
+          : { text: "" },
         {
           text: "Match Medical Performance Report",
           fontSize: 18,
