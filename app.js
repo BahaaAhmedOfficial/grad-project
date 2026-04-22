@@ -2337,11 +2337,7 @@ async function exportMatchPdf(player, summary, button, originalText) {
       { label: "Body Temp", key: "bodyTemp", unit: "degC" },
       { label: "Muscle Fatigue", key: "muscleFatigue", unit: "Hz" },
       { label: "Acceleration", key: "acceleration", unit: "m/s2" },
-      { label: "Speed", key: "speed", unit: "m/s" },
       { label: "ECG", key: "ecg", unit: "mV" },
-      { label: "Gyro X", key: "gyroX", unit: "deg/s" },
-      { label: "Gyro Y", key: "gyroY", unit: "deg/s" },
-      { label: "Gyro Z", key: "gyroZ", unit: "deg/s" },
     ];
 
     const telemetryTableBody = [
