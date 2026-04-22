@@ -2300,7 +2300,9 @@ async function generateAISuggestions(player, summary) {
     }
 
     if (response.status === 429) {
-      const quotaError = new Error("System busy, please wait 30 seconds");
+      const quotaError = new Error(
+        "Please wait a few seconds before exporting again.",
+      );
       quotaError.code = "RATE_LIMITED";
       throw quotaError;
     }
@@ -2396,7 +2398,7 @@ async function exportMatchPdf(player, summary, button, originalText) {
       suggestions = await generateAISuggestions(player, summary);
     } catch (error) {
       if (error?.code === "RATE_LIMITED") {
-        window.alert("System busy, please wait 30 seconds");
+        window.alert("Please wait a few seconds before exporting again.");
         return;
       }
 
@@ -2659,6 +2661,9 @@ async function exportMatchPdf(player, summary, button, originalText) {
     await saveMatchReportToDB(player, telemetrySummaryPayload, suggestions);
 
     window.pdfMake.createPdf(docDefinition).download("Match_Report.pdf");
+  } catch (error) {
+    console.error("Failed to generate match report PDF:", error);
+    window.alert("Report export failed. Please try again.");
   } finally {
     if (button) {
       button.disabled = false;
