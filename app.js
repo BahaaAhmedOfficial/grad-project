@@ -1861,10 +1861,22 @@ function renderTeamOverview() {
       }),
     );
 
+    const isInactiveAndSimulating = !isActive && isSimulating;
+    let statusPillClass = "";
+    let statusText = "";
+
+    if (isInactiveAndSimulating) {
+      statusPillClass = "status-pill text-orange-400";
+      statusText = "Simulated";
+    } else {
+      statusPillClass = `status-pill ${player.online ? "on" : "off"}`;
+      statusText = player.online ? "Online" : "Offline";
+    }
+
     button.appendChild(
       createElement("span", {
-        className: `status-pill ${player.online ? "on" : "off"}`,
-        text: player.online ? "Online" : "Offline",
+        className: statusPillClass,
+        text: statusText,
       }),
     );
 
