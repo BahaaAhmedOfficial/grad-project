@@ -81,7 +81,7 @@ body {
   box-shadow: 0 30px 65px rgba(2, 16, 7, 0.35);
   background:
     linear-gradient(rgba(17, 80, 34, 0.3), rgba(17, 80, 34, 0.3)),
-    url("assets/soccerField.jpeg") center center / cover no-repeat;
+    url("assets/soccerField.jpg") center center / cover no-repeat;
 }
 
 .field-board::before {
