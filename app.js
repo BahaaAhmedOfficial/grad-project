@@ -846,78 +846,6 @@ function dismissCriticalModal() {
   render();
 }
 
-function getNotificationHistoryForPlayer(playerId) {
-  if (!state.physiological.notificationHistoryByPlayer.has(playerId)) {
-    state.physiological.notificationHistoryByPlayer.set(playerId, []);
-  }
-
-  return state.physiological.notificationHistoryByPlayer.get(playerId);
-}
-
-function renderNotificationHistoryEntry(entry) {
-  const tagClass =
-    entry.tier >= 3
-      ? "bg-red-100 text-red-700 border-red-300"
-      : "bg-amber-100 text-amber-700 border-amber-300";
-  const tagText = entry.tier >= 3 ? "Tier 3 Critical" : "Tier 2 Warning";
-
-  const row = createElement("div", {
-    className:
-      "flex items-start gap-2 border-b border-slate-200 py-2 text-sm text-slate-800",
-  });
-
-  row.appendChild(
-    createElement("span", {
-      className:
-        "shrink-0 rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600",
-      text: entry.time,
-    }),
-  );
-
-  row.appendChild(
-    createElement("span", {
-      className: `shrink-0 rounded border px-2 py-0.5 text-xs font-semibold ${tagClass}`,
-      text: tagText,
-    }),
-  );
-
-  row.appendChild(
-    createElement("span", {
-      className: "leading-5",
-      text: entry.message,
-    }),
-  );
-
-  return row;
-}
-
-function logToNotificationHistory(message, tier) {
-  const playerId = Number(state.activeVestPlayerId || 0);
-  if (!playerId || !message) {
-    return;
-  }
-
-  const history = getNotificationHistoryForPlayer(playerId);
-  const entry = {
-    time: new Date().toLocaleTimeString(),
-    tier,
-    message,
-  };
-
-  history.push(entry);
-  if (history.length > 300) {
-    history.shift();
-  }
-
-  const historyContainer = document.getElementById("notification-history");
-  if (!historyContainer) {
-    return;
-  }
-
-  historyContainer.appendChild(renderNotificationHistoryEntry(entry));
-  historyContainer.scrollTop = historyContainer.scrollHeight;
-}
-
 function handleTelemetryAlerts(evaluationResult) {
   const now = Date.now();
   const playerId = evaluationResult.playerId;
@@ -949,9 +877,6 @@ function handleTelemetryAlerts(evaluationResult) {
       now - previousCritical.at > CRITICAL_REOPEN_DEBOUNCE_MS;
 
     if (shouldOpenCritical) {
-      evaluationResult.criticalMessages.forEach((message) => {
-        logToNotificationHistory(message, 3);
-      });
       state.physiological.criticalModal = {
         playerId,
         title: "Critical Physiological Alert",
@@ -2668,14 +2593,9 @@ async function exportMatchPdf(player, summary, button, originalText) {
       },
     };
 
-    const cappedAlerts = getCriticalMessages(
-      player.name || "Unknown Player",
-      player.telemetry || {},
-    ).slice(-10);
-
     const telemetrySummaryPayload = {
       maxHeartRate: player.telemetry?.heartRate ?? null,
-      criticalAlertsTriggered: cappedAlerts,
+      criticalAlertsTriggered: [],
       coachSummary: summary || "",
     };
 
@@ -2741,28 +2661,6 @@ function renderMatchReport(player) {
     }),
   );
 
-  const notificationHistory = createElement("div", {
-    className:
-      "h-56 w-full overflow-y-auto rounded-xl border border-slate-300 bg-white p-3 font-mono text-sm leading-6 text-slate-800 shadow-inner",
-    attrs: { id: "notification-history" },
-  });
-
-  const history = getNotificationHistoryForPlayer(player.id);
-  if (!history.length) {
-    notificationHistory.appendChild(
-      createElement("p", {
-        className: "text-slate-500",
-        text: "No critical history yet. New Tier 3 alerts will appear here.",
-      }),
-    );
-  } else {
-    history.forEach((entry) => {
-      notificationHistory.appendChild(renderNotificationHistoryEntry(entry));
-    });
-  }
-
-  panel.appendChild(notificationHistory);
-  notificationHistory.scrollTop = notificationHistory.scrollHeight;
   return panel;
 }
 
