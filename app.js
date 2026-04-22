@@ -2281,12 +2281,25 @@ async function generateAISuggestions(player, summary) {
   const requestPromise = (async () => {
     let response;
     try {
+      console.log(
+        "🚨 EXPORT INITIATED. Payload size:",
+        JSON.stringify(payload).length,
+        "bytes",
+      );
+      console.log("📦 Payload Content:", payload);
       response = await fetch(`${AI_PROXY_URL}/api/analyze-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      console.log("📡 API response received. Status:", response.status);
     } catch (error) {
+      console.error(
+        "❌ API CALL FAILED. Status:",
+        response?.status,
+        "Error:",
+        error,
+      );
       throw new Error(
         "AI analysis unavailable. Ensure backend API is reachable.",
       );
@@ -2308,6 +2321,12 @@ async function generateAISuggestions(player, summary) {
     }
 
     if (!response.ok) {
+      console.error(
+        "❌ API CALL FAILED. Status:",
+        response?.status,
+        "Error:",
+        data?.error || "Unknown backend error",
+      );
       throw new Error(data.error || "Unknown backend error");
     }
 
@@ -2649,12 +2668,14 @@ async function exportMatchPdf(player, summary, button, originalText) {
       },
     };
 
+    const cappedAlerts = getCriticalMessages(
+      player.name || "Unknown Player",
+      player.telemetry || {},
+    ).slice(-10);
+
     const telemetrySummaryPayload = {
       maxHeartRate: player.telemetry?.heartRate ?? null,
-      criticalAlertsTriggered: getCriticalMessages(
-        player.name || "Unknown Player",
-        player.telemetry || {},
-      ),
+      criticalAlertsTriggered: cappedAlerts,
       coachSummary: summary || "",
     };
 
