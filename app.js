@@ -1253,6 +1253,46 @@ function backToTeam() {
   window.location.hash = "#/";
 }
 
+function validateAthleteProfile(profile) {
+  const name = String(profile?.name || "").trim();
+  if (!name) {
+    return { valid: false, message: "Please enter an athlete name." };
+  }
+
+  if (!/^[A-Za-z\s]+$/.test(name)) {
+    return {
+      valid: false,
+      message: "Name can contain letters and spaces only.",
+    };
+  }
+
+  const age = Number(profile?.age);
+  if (!Number.isFinite(age) || age < 16 || age > 40) {
+    return {
+      valid: false,
+      message: "Age must be between 16 and 40.",
+    };
+  }
+
+  const heightCm = Number(profile?.heightCm);
+  if (!Number.isFinite(heightCm) || heightCm < 150 || heightCm > 220) {
+    return {
+      valid: false,
+      message: "Height must be between 150 cm and 220 cm.",
+    };
+  }
+
+  const weightKg = Number(profile?.weightKg);
+  if (!Number.isFinite(weightKg) || weightKg < 50 || weightKg > 130) {
+    return {
+      valid: false,
+      message: "Weight must be between 50 kg and 130 kg.",
+    };
+  }
+
+  return { valid: true, message: "" };
+}
+
 function handleProfileSubmit(form) {
   const payload = {
     name: form.name.trim(),
@@ -1262,13 +1302,9 @@ function handleProfileSubmit(form) {
     jerseyNumber: Number(form.jerseyNumber),
   };
 
-  if (
-    !payload.name ||
-    payload.heightCm <= 0 ||
-    payload.weightKg <= 0 ||
-    payload.age <= 0
-  ) {
-    pushToast("Please enter a valid athlete profile.", "info");
+  const validation = validateAthleteProfile(payload);
+  if (!validation.valid) {
+    pushToast(validation.message, "info");
     return;
   }
 
@@ -1586,18 +1622,27 @@ function startMatch() {
     return;
   }
 
+  const player = getSelectedPlayer();
+  if (!player) {
+    pushToast("Complete athlete setup first.", "info");
+    return;
+  }
+
+  const validation = validateAthleteProfile(player);
+  if (!validation.valid) {
+    pushToast(validation.message, "info");
+    return;
+  }
+
   state.matchState = "Active";
   state.matchStartedAt = Date.now();
   playWhistle(START_MATCH_WHISTLE_SRC);
 
-  const player = getSelectedPlayer();
-  if (player) {
-    const prev = getPlayerSummary(player);
-    setPlayerSummary(
-      player.id,
-      `${prev}\nSession started at ${new Date().toLocaleTimeString()}.\n`,
-    );
-  }
+  const prev = getPlayerSummary(player);
+  setPlayerSummary(
+    player.id,
+    `${prev}\nSession started at ${new Date().toLocaleTimeString()}.\n`,
+  );
 
   render();
 }
@@ -1659,7 +1704,12 @@ function renderAthleteSetupModal() {
     {
       key: "name",
       label: "Name",
-      attrs: { required: "", placeholder: "Athlete name" },
+      attrs: {
+        required: "",
+        placeholder: "Athlete name",
+        pattern: "[A-Za-z\\s]+",
+        title: "Name can contain letters and spaces only.",
+      },
       span2: true,
     },
     {
@@ -1668,8 +1718,8 @@ function renderAthleteSetupModal() {
       attrs: {
         required: "",
         type: "number",
-        min: "50",
-        max: "260",
+        min: "150",
+        max: "220",
         step: "0.1",
       },
     },
@@ -1679,15 +1729,15 @@ function renderAthleteSetupModal() {
       attrs: {
         required: "",
         type: "number",
-        min: "20",
-        max: "250",
+        min: "50",
+        max: "130",
         step: "0.1",
       },
     },
     {
       key: "age",
       label: "Age",
-      attrs: { required: "", type: "number", min: "10", max: "60", step: "1" },
+      attrs: { required: "", type: "number", min: "16", max: "40", step: "1" },
     },
     {
       key: "jerseyNumber",
@@ -1896,6 +1946,11 @@ function renderMatchControls() {
       "glass-panel mb-5 flex flex-wrap items-center justify-between gap-3 px-4 py-3",
   });
 
+  const selectedPlayer = getSelectedPlayer();
+  const selectedPlayerValidation = validateAthleteProfile(selectedPlayer);
+  const canStartMatch =
+    state.matchState !== "Active" && selectedPlayerValidation.valid;
+
   const left = createElement("div", { className: "flex items-center gap-2" });
   left.appendChild(
     createElement("p", {
@@ -1922,7 +1977,7 @@ function renderMatchControls() {
     className:
       "rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50",
     text: "Start Match",
-    attrs: { disabled: state.matchState === "Active" ? "" : null },
+    attrs: { disabled: canStartMatch ? null : "" },
     on: { click: startMatch },
   });
 
@@ -2311,6 +2366,12 @@ async function saveMatchReportToDB(
 }
 
 async function exportMatchPdf(player, summary, button, originalText) {
+  const validation = validateAthleteProfile(player);
+  if (!validation.valid) {
+    pushToast(validation.message, "info");
+    return;
+  }
+
   if (!window.pdfMake || typeof window.pdfMake.createPdf !== "function") {
     window.alert("pdfmake library failed to load.");
     return;
@@ -2612,13 +2673,16 @@ function renderMatchReport(player) {
 
   const summaryText = getPlayerSummary(player);
   const sessionDurationText = getSessionDurationText();
+  const profileValidation = validateAthleteProfile(player);
+  const canExportReport =
+    !!summaryText.trim() && profileValidation.valid && !state.exportLock;
 
   const exportButton = createElement("button", {
     className:
       "rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-45",
     text: state.exportLock ? "Generating AI Report..." : "Export to PDF",
     attrs: {
-      disabled: !summaryText.trim() || state.exportLock ? "" : null,
+      disabled: canExportReport ? null : "",
       "data-action": "export-report",
       "data-player-id": String(player.id),
     },
@@ -2829,6 +2893,12 @@ function handleDocumentClick(event) {
   const playerId = Number(button.getAttribute("data-player-id"));
   const player = state.players.find((entry) => entry.id === playerId);
   if (!player) {
+    return;
+  }
+
+  const validation = validateAthleteProfile(player);
+  if (!validation.valid) {
+    pushToast(validation.message, "info");
     return;
   }
 
