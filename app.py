@@ -8,7 +8,7 @@ from google.api_core.exceptions import ResourceExhausted
 
 
 load_dotenv()
-# Comment
+# Comment update
 API_KEY = os.getenv("MY_SECRET_API_KEY")
 if not API_KEY:
     raise RuntimeError("MY_SECRET_API_KEY is missing. Add it to .env")
