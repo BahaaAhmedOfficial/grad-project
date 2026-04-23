@@ -108,6 +108,8 @@ const state = {
   activeVestPlayerId: null,
   matchState: "Idle",
   matchStartedAt: null,
+  matchEndedAt: null,
+  isFrozen: false,
   playerPositions: createInitialFormationPositions(),
   route: parseHashRoute(),
   summaryByPlayer: new Map(),
@@ -481,12 +483,36 @@ function stopSimulation(markOffline = true) {
   refreshSimulationButton();
 }
 
+function freezeDashboard() {
+  if (!state.isFrozen) {
+    state.isFrozen = true;
+  }
+
+  if (state.matchStartedAt && !state.matchEndedAt) {
+    state.matchEndedAt = Date.now();
+  }
+
+  if (state.matchState === "Active") {
+    state.matchState = "Idle";
+  }
+
+  state.physiological.criticalModal = null;
+  setECGVisibility(false);
+  disconnectVestSocket();
+}
+
+function unfreezeDashboard() {
+  state.isFrozen = false;
+  state.matchEndedAt = null;
+}
+
 function startSimulation() {
   if (!state.activeVestPlayerId) {
     pushToast("Select an active vest player before simulation.", "info");
     return;
   }
 
+  unfreezeDashboard();
   disconnectVestSocket();
   state.ws.connected = false;
   isSimulating = true;
@@ -507,6 +533,7 @@ function startSimulation() {
 function toggleSimulation() {
   if (isSimulating) {
     stopSimulation(true);
+    freezeDashboard();
     render();
     return;
   }
@@ -877,6 +904,16 @@ function handleTelemetryAlerts(evaluationResult) {
       now - previousCritical.at > CRITICAL_REOPEN_DEBOUNCE_MS;
 
     if (shouldOpenCritical) {
+      const history =
+        state.physiological.notificationHistoryByPlayer.get(playerId) || [];
+      evaluationResult.criticalMessages.forEach((message) => {
+        history.push(`[${new Date(now).toLocaleTimeString()}] ${message}`);
+      });
+      state.physiological.notificationHistoryByPlayer.set(
+        playerId,
+        history.slice(-60),
+      );
+
       state.physiological.criticalModal = {
         playerId,
         title: "Critical Physiological Alert",
@@ -1161,9 +1198,10 @@ function getSessionDurationText() {
     return "00:00";
   }
 
+  const sessionEnd = state.matchEndedAt || Date.now();
   const seconds = Math.max(
     0,
-    Math.floor((Date.now() - state.matchStartedAt) / 1000),
+    Math.floor((sessionEnd - state.matchStartedAt) / 1000),
   );
   const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
   const ss = String(seconds % 60).padStart(2, "0");
@@ -1242,6 +1280,10 @@ function handleProfileSubmit(form) {
   state.players = createInitialPlayers(payload);
   state.playerPositions = createInitialFormationPositions();
   state.summaryByPlayer.clear();
+  state.matchState = "Idle";
+  state.matchStartedAt = null;
+  state.matchEndedAt = null;
+  state.isFrozen = false;
 
   if (!window.location.hash) {
     window.location.hash = "#/";
@@ -1414,6 +1456,10 @@ function connectVestSocket() {
 }
 
 function handleTelemetryPacket(playerId, payload) {
+  if (state.isFrozen) {
+    return;
+  }
+
   const now = Date.now();
   const movementState = state.movement;
   const ecgSamples = Array.isArray(payload.ecgSamples)
@@ -1491,7 +1537,7 @@ function handleTelemetryPacket(playerId, payload) {
 
 function startRandomDrift() {
   setInterval(() => {
-    if (!state.players.length) {
+    if (!state.players.length || state.isFrozen) {
       return;
     }
 
@@ -1559,8 +1605,14 @@ function startMatch() {
     return;
   }
 
+  unfreezeDashboard();
+  if (!isSimulating) {
+    connectVestSocket();
+  }
+
   state.matchState = "Active";
   state.matchStartedAt = Date.now();
+  state.matchEndedAt = null;
   playWhistle(START_MATCH_WHISTLE_SRC);
 
   const prev = getPlayerSummary(player);
@@ -1577,8 +1629,15 @@ function endMatch() {
     return;
   }
 
+  if (isSimulating) {
+    stopSimulation(true);
+  }
+
   state.matchState = "Idle";
+  state.matchEndedAt = Date.now();
   playWhistle(END_MATCH_WHISTLE_SRC);
+
+  freezeDashboard();
 
   const player = getSelectedPlayer();
   if (player) {
@@ -2640,6 +2699,7 @@ function renderMatchReport(player) {
       "rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-45",
     text: state.exportLock ? "Generating AI Report..." : "Export to PDF",
     attrs: {
+      type: "button",
       disabled: canExportReport ? null : "",
       "data-action": "export-report",
       "data-player-id": String(player.id),
@@ -2658,6 +2718,31 @@ function renderMatchReport(player) {
         `Height: ${player.heightCm || "-"} cm | Weight: ${player.weightKg || "-"} kg | ` +
         `Age: ${player.age || "-"} | Session Duration: ${sessionDurationText} | ` +
         `Samples Captured: ${player.samplesCaptured} | Match State: ${state.matchState}`,
+    }),
+  );
+
+  const criticalHistory =
+    state.physiological.notificationHistoryByPlayer.get(player.id) || [];
+  const criticalHistoryText = criticalHistory.length
+    ? criticalHistory.join("\n")
+    : "No Tier 3 critical history yet.";
+
+  panel.appendChild(
+    createElement("p", {
+      className: "text-sm font-semibold text-slate-700",
+      text: "Tier 3 Critical History",
+    }),
+  );
+
+  panel.appendChild(
+    createElement("textarea", {
+      className:
+        "w-full min-h-[8.5rem] rounded-xl border border-slate-300 bg-slate-50 p-3 text-xs leading-5 text-slate-700",
+      text: criticalHistoryText,
+      attrs: {
+        readonly: "",
+        "aria-label": "Tier 3 critical history",
+      },
     }),
   );
 
@@ -2751,7 +2836,7 @@ function setActiveVestOffline() {
 
 function startConnectionGuard() {
   setInterval(() => {
-    if (!state.activeVestPlayerId) {
+    if (!state.activeVestPlayerId || state.isFrozen) {
       return;
     }
 
@@ -2773,7 +2858,12 @@ function startConnectionGuard() {
 
 function startClockRefresh() {
   setInterval(() => {
-    if (state.route.name === "player" && state.matchStartedAt) {
+    if (
+      state.route.name === "player" &&
+      state.matchState === "Active" &&
+      state.matchStartedAt &&
+      !state.isFrozen
+    ) {
       render();
     }
   }, 1000);
@@ -2809,6 +2899,10 @@ function init() {
 }
 
 function handleDocumentClick(event) {
+  if (!event.isTrusted) {
+    return;
+  }
+
   const dismissCriticalButton = event.target.closest(
     '[data-action="dismiss-critical"]',
   );
