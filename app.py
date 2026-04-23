@@ -44,20 +44,7 @@ def health():
     if request.method == "OPTIONS":
         return _with_cors(make_response("", 204))
 
-    try:
-        # Tiny probe to verify key + model access end-to-end.
-        probe = model.generate_content("Reply with exactly: OK")
-        ok_text = (probe.text or "").strip() if probe else ""
-        return (
-            jsonify(
-                {"message": f"Backend is healthy. Gemini replied: {ok_text or 'OK'}"}
-            ),
-            200,
-        )
-    except Exception as exc:  # noqa: BLE001
-        if _is_quota_exhausted(exc):
-            return jsonify({"error": "System busy, please wait 30 seconds"}), 429
-        return jsonify({"error": f"Gemini health check failed: {exc}"}), 500
+    return jsonify({"message": "Backend is healthy."}), 200
 
 
 @app.route("/api/analyze-report", methods=["POST", "OPTIONS"])

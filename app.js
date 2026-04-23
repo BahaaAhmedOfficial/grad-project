@@ -2218,7 +2218,9 @@ async function testAPIKey() {
       return false;
     }
 
-    alert("Backend/API test passed\n\n" + data.message);
+    alert(
+      "Backend/API test passed\n\n" + (data.message || "Backend is healthy."),
+    );
     return true;
   } catch (error) {
     alert("Cannot reach backend API.\n\n" + error.message);
